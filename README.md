@@ -1,8 +1,9 @@
 # cozempic
 Claude Desktop-compatible MCP Server
-context_surgeon.py  v1.0.0
 
 CONTEXT SURGEON — Surgical context cleaning for Claude Desktop. The scalpel where the native compact is a sledgehammer.
+
+context_surgeon.py  v1.0.0
 
 PREREQUISITES
   Python 3.10 or newer. Zero pip packages required (pure stdlib).
