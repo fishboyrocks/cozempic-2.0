@@ -1,0 +1,1250 @@
+#!/usr/bin/env python3
+"""
+context_surgeon.py  v1.0.0
+ _______________________________________________________________
+|                                                               |
+|  CONTEXT SURGEON — Surgical context cleaning for Claude       |
+|  Desktop. The scalpel where the native compact is a           |
+|  sledgehammer.                                                |
+|_______________________________________________________________|
+
+PREREQUISITES
+  Python 3.10 or newer. Zero pip packages required (pure stdlib).
+  Check version : python --version   (or python3 --version)
+  Download 3.10+: https://www.python.org/downloads/
+  Windows note  : during install, check "Add Python to PATH"
+
+  No pip install needed. This script uses only the Python standard
+  library. If Python itself is missing or outdated, the script
+  detects this at startup and prints the download URL.
+
+INSTALL AS MCP SERVER (run once; then restart Claude Desktop)
+  python context_surgeon.py setup-mcp
+
+CLI USAGE
+  python context_surgeon.py discover                    find Claude Desktop data
+  python context_surgeon.py diagnose conversation.json  analyze for bloat
+  python context_surgeon.py prune    conversation.json  compress + create briefing
+  python context_surgeon.py prune conversation.txt --verbatim 10 --rx standard
+  python context_surgeon.py prune conversation.txt --output briefing.md
+  python context_surgeon.py prune - < pasted_convo.txt  read from stdin
+
+MCP TOOLS (available in Claude Desktop after setup-mcp + restart)
+  diagnose_conversation   token estimates, noise counts, savings projections
+  prune_conversation      surgical pruning with configurable prescription
+  create_briefing         compress to fresh-start document; paste into new chat
+  extract_rules           extract behavioral corrections ("don't do X", "always Y")
+
+WHY THIS IS BETTER THAN THE NATIVE COMPACT
+  Native compact: summarizes everything into a blob. Key technical
+  details, behavioral corrections, code, specific constraints? Gone.
+
+  This tool:
+    - Extracts "don't do X" / "always Y" corrections and leads with them
+    - Keeps your last N turns character-perfect
+    - Compresses only the prose fat from older turns
+    - NEVER touches code blocks
+    - Reports exactly what changed and what was preserved
+
+WORKFLOW
+  1. As your conversation approaches its context limit, export it
+     from Claude Desktop (or copy-paste the entire conversation to
+     a text or JSON file).
+  2. Run:  python context_surgeon.py prune convo.txt --output briefing.md
+  3. Open a new Claude Desktop conversation.
+  4. Paste the contents of briefing.md as your first message.
+  5. Continue exactly where you left off with full context headroom.
+
+NOTE ON "81/100 ATTACHMENTS" vs. CONTEXT LENGTH
+  If your limit is project knowledge files (Claude Desktop projects
+  allow up to 100 knowledge files): that is a different constraint
+  from conversation context. Remove outdated/redundant files via
+  Claude Desktop's UI (project settings -> knowledge). This script
+  addresses conversation context length, not the knowledge file cap.
+
+INPUT FORMATS
+  JSON    Claude.ai / Claude Desktop export, or raw Claude API
+          messages array: [{"role":"user","content":"..."}, ...]
+  JSONL   Claude Code session (partial compatibility)
+  Text    User: ... / Human: ... / Assistant: ... / Claude: ...
+  Stdin   Pass - as the filename to read from stdin
+
+PRESCRIPTIONS
+  gentle      strip thinking blocks + XML noise only
+  standard    + deduplicate repeated-content turns           [default]
+  aggressive  + compress verbose older turns (code blocks always preserved)
+
+VERBATIM TURNS
+  The N most recent turns are kept character-perfect; only older
+  turns are processed according to the prescription. Default: 10.
+
+v1.0.0 | https://github.com/fishboyrocks/cozempic-2.0
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import sys
+import textwrap
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+
+# ---- Windows UTF-8 fix -------------------------------------------------------
+# Without this, MCP JSON-RPC over stdio silently mangles non-ASCII on Windows
+# (default cp1252 encoding). Must run before any I/O.
+if sys.platform == "win32":
+    import io as _io
+    sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    sys.stdin  = _io.TextIOWrapper(sys.stdin.buffer,  encoding="utf-8", errors="replace")
+
+
+# ---- Constants ---------------------------------------------------------------
+
+__version__         = "1.0.0"
+CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
+DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
+DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
+MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
+MAX_RULE_LEN        = 350       # max chars per extracted rule sentence
+INPUT_WARN_MB       = 5         # warn if conversation input exceeds this size
+
+THINKING_RE = re.compile(
+    r"<thinking>\s*.*?\s*</thinking>"
+    r"|<think>\s*.*?\s*</think>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+XML_NOISE_RE = re.compile(
+    r"<system-reminder>.*?</system-reminder>"
+    r"|<local-command(?:-caveat|-stdout|-stderr)?>.*?"
+    r"</local-command(?:-caveat|-stdout|-stderr)?>"
+    r"|<command-(?:name|message|args)>.*?</command-(?:name|message|args)>",
+    re.DOTALL,
+)
+
+CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
+
+# Patterns that signal a behavioral correction in a user turn.
+# Word boundaries (\b) prevent false matches inside longer words.
+CORRECTION_RE = re.compile(
+    r"\b(?:"
+    r"don'?t"
+    r"|do not"
+    r"|please don'?t"
+    r"|never"
+    r"|always"
+    r"|stop\s+\w+ing"
+    r"|from now on"
+    r"|remember to\b"
+    r"|remember that\b"
+    r"|make sure to\b"
+    r"|make sure you\b"
+    r"|you shouldn'?t"
+    r"|use .{1,30} instead"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# ---- Data structures ---------------------------------------------------------
+
+@dataclass
+class Turn:
+    """A single conversation turn."""
+    role:    str    # "user" | "assistant" | "system"
+    content: str
+    index:   int = 0
+
+    def tokens(self) -> int:
+        """Estimated token count using the calibrated chars-per-token ratio."""
+        return max(1, int(len(self.content) / CHARS_PER_TOKEN))
+
+
+@dataclass
+class PruneStats:
+    orig_turns:   int
+    final_turns:  int
+    orig_tokens:  int
+    final_tokens: int
+    saved_tokens: int
+    saved_pct:    float
+    prescription: str
+    verbatim:     int
+    rules_found:  int
+    rules: list[str] = field(default_factory=list)
+
+
+# ---- Prerequisite check ------------------------------------------------------
+
+def check_prerequisites() -> None:
+    """
+    Verify Python 3.10+. Zero pip packages are required; this script
+    uses only the Python standard library.
+
+    If Python is too old or missing:
+      1. Download Python 3.10+: https://www.python.org/downloads/
+      2. Windows: during install, check "Add Python to PATH"
+      3. Rerun this script.
+    """
+    if sys.version_info < (3, 10):
+        print(
+            f"ERROR: Python 3.10 or newer is required.\n"
+            f"You have: {sys.version}\n\n"
+            f"Download Python 3.10+: https://www.python.org/downloads/\n"
+            f"Windows tip: check 'Add Python to PATH' during installation.\n"
+            f"After installing, rerun: python context_surgeon.py ...",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+# ---- Conversation parsing ----------------------------------------------------
+
+def parse_conversation(source: str) -> list[Turn]:
+    """
+    Parse a conversation from JSON, JSONL, or plain text.
+    Returns a list of Turn objects. Never raises; falls back gracefully.
+    """
+    source = source.strip()
+    if not source:
+        return []
+
+    size_mb = len(source) / 1_048_576
+    if size_mb > INPUT_WARN_MB:
+        print(
+            f"Warning: input is {size_mb:.1f} MB; processing may be slow.",
+            file=sys.stderr,
+        )
+
+    # JSON (array or wrapped dict)
+    if source[0] in ("[", "{"):
+        try:
+            return _parse_json(source)
+        except Exception:
+            pass  # fall through to JSONL / text
+
+    # JSONL (one JSON object per line — Claude Code session format)
+    first_nonblank = next((l.strip() for l in source.splitlines() if l.strip()), "")
+    if first_nonblank.startswith("{"):
+        try:
+            return _parse_jsonl(source)
+        except Exception:
+            pass
+
+    # Plain text (User: / Assistant: alternation)
+    return _parse_text(source)
+
+
+def _normalize_role(raw: str) -> str:
+    r = raw.strip().lower()
+    if r in ("human", "user"):
+        return "user"
+    if r in ("assistant", "claude", "ai"):
+        return "assistant"
+    return r
+
+
+def _content_to_str(content: object) -> str:
+    """Flatten any Claude API content representation to a plain string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype == "text":
+                parts.append(block.get("text", ""))
+            elif btype == "thinking":
+                # Wrap so the thinking-strip regex catches it
+                parts.append(f"<thinking>{block.get('thinking', '')}</thinking>")
+            elif btype == "tool_use":
+                inp = json.dumps(block.get("input", {}), ensure_ascii=False)
+                parts.append(f"[tool:{block.get('name', '')} {inp[:200]}]")
+            elif btype == "tool_result":
+                rc = block.get("content", "")
+                parts.append(f"[result: {_content_to_str(rc)[:300]}]")
+            # image / document blocks carry no useful text; intentionally skipped
+        return "\n".join(p for p in parts if p)
+    if isinstance(content, dict):
+        # Unusual but handle gracefully
+        return json.dumps(content, ensure_ascii=False)
+    return str(content) if content is not None else ""
+
+
+def _parse_json(source: str) -> list[Turn]:
+    data = json.loads(source)
+
+    # Unwrap common container keys
+    if isinstance(data, dict):
+        for key in ("messages", "conversation", "chat_messages", "turns"):
+            if key in data and isinstance(data[key], list):
+                data = data[key]
+                break
+        else:
+            # Maybe the whole dict is a single message
+            if "role" in data or "type" in data:
+                data = [data]
+            else:
+                raise ValueError("Unrecognized JSON dict structure")
+
+    if not isinstance(data, list):
+        raise ValueError("Expected a JSON array")
+
+    turns: list[Turn] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            continue
+        role = _normalize_role(
+            item.get("role") or item.get("type") or "unknown"
+        )
+        if role not in ("user", "assistant", "system"):
+            continue
+        content = _content_to_str(item.get("content", ""))
+        if content.strip():
+            turns.append(Turn(role=role, content=content, index=i))
+
+    return turns
+
+
+def _parse_jsonl(source: str) -> list[Turn]:
+    turns: list[Turn] = []
+    idx = 0
+    for line in source.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mtype = obj.get("type", "")
+        if mtype not in ("user", "assistant"):
+            continue
+        inner   = obj.get("message", {})
+        content = _content_to_str(inner.get("content", ""))
+        if content.strip():
+            turns.append(Turn(role=mtype, content=content, index=idx))
+            idx += 1
+    return turns
+
+
+def _parse_text(source: str) -> list[Turn]:
+    pattern = re.compile(
+        r"^(User|Human|Assistant|Claude|AI)\s*:\s*",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    parts = pattern.split(source)
+
+    if len(parts) < 3:
+        content = source.strip()
+        return [Turn(role="user", content=content, index=0)] if content else []
+
+    turns: list[Turn] = []
+    idx = 0
+    i   = 1
+    while i + 1 < len(parts):
+        role    = _normalize_role(parts[i])
+        content = parts[i + 1].strip()
+        if role not in ("user", "assistant"):
+            role = "user"
+        if content:
+            turns.append(Turn(role=role, content=content, index=idx))
+            idx += 1
+        i += 2
+
+    return turns
+
+
+# ---- Content cleaning --------------------------------------------------------
+
+def strip_thinking(text: str) -> str:
+    return THINKING_RE.sub("", text).strip()
+
+
+def strip_xml_noise(text: str) -> str:
+    return XML_NOISE_RE.sub("", text).strip()
+
+
+def clean(turn: Turn) -> Turn:
+    """Remove noise from a turn without compressing any content."""
+    c = strip_thinking(turn.content)
+    c = strip_xml_noise(c)
+    c = re.sub(r"\n{3,}", "\n\n", c).strip()
+    return Turn(role=turn.role, content=c, index=turn.index)
+
+
+# ---- Behavioral rule extraction ----------------------------------------------
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """Extract the full sentence containing the match at [start, end)."""
+    # Walk left to the previous sentence boundary
+    left_dot = text.rfind(".", 0, start)
+    left     = max(left_dot + 1, max(0, start - 250))
+    # Walk right to the next sentence boundary
+    right_dot = text.find(".", end)
+    if right_dot == -1 or (right_dot - end) > 250:
+        right = min(len(text), end + 250)
+    else:
+        right = right_dot + 1
+    return text[left:right].strip()
+
+
+def extract_rules(turns: list[Turn]) -> list[str]:
+    """
+    Extract explicit behavioral corrections from user turns.
+
+    Implements a simplified version of cozempic's behavioral digest:
+    the content most critical to carry forward when resetting context.
+    Patterns: "don't do X", "never use Y", "always add Z",
+              "from now on", "remember that", "make sure to" ...
+    """
+    seen:  set[str]  = set()
+    rules: list[str] = []
+
+    for turn in turns:
+        if turn.role != "user":
+            continue
+        for m in CORRECTION_RE.finditer(turn.content):
+            sentence = _sentence_around(turn.content, m.start(), m.end())
+            if len(sentence) < 10 or len(sentence) > MAX_RULE_LEN:
+                continue
+            key = re.sub(r"\s+", " ", sentence.lower().strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(sentence)
+            if len(rules) >= MAX_RULES:
+                return rules
+
+    return rules
+
+
+# ---- Deduplication -----------------------------------------------------------
+
+def deduplicate(turns: list[Turn]) -> list[Turn]:
+    """
+    Remove turns whose first 2000 chars hash to the same value as an
+    earlier turn, keeping only the MOST RECENT occurrence of each.
+    """
+    hash_to_last: dict[str, int] = {}
+    for i, turn in enumerate(turns):
+        key = hashlib.md5(turn.content[:2000].encode("utf-8")).hexdigest()
+        hash_to_last[key] = i  # always overwrite with the latest index
+
+    keep = set(hash_to_last.values())
+    return [t for i, t in enumerate(turns) if i in keep]
+
+
+# ---- Compression (aggressive prescription only) ------------------------------
+
+def compress(turn: Turn) -> Turn:
+    """
+    Compress a turn to its most informative sentences.
+    Code blocks are NEVER modified; first paragraph is always kept verbatim.
+    Only applied to old turns under the aggressive prescription.
+    """
+    content = turn.content
+
+    # Protect code blocks before any processing
+    saved_blocks: list[str] = []
+
+    def _save_block(m: re.Match) -> str:
+        saved_blocks.append(m.group(0))
+        return f"\x00CB{len(saved_blocks)-1}\x00"
+
+    content = CODE_BLOCK_RE.sub(_save_block, content)
+    content = strip_thinking(content)
+    content = strip_xml_noise(content)
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", content) if p.strip()]
+
+    def _restore(text: str) -> str:
+        for i, block in enumerate(saved_blocks):
+            text = text.replace(f"\x00CB{i}\x00", block)
+        return text
+
+    # Short or code-only turn: just restore and return
+    if len(paragraphs) <= 2:
+        return Turn(role=turn.role, content=_restore(content).strip(), index=turn.index)
+
+    result_parts: list[str] = []
+
+    # Always keep the first paragraph (usually the key question or decision)
+    result_parts.append(_restore(paragraphs[0]))
+
+    for para in paragraphs[1:]:
+        para_restored = _restore(para)
+        # Any paragraph that contains a code block is kept in full
+        if "```" in para_restored:
+            result_parts.append(para_restored)
+            continue
+        # Non-code paragraphs: extract high-signal sentences
+        sentences = re.split(r"(?<=[.!?])\s+", para_restored)
+        key_sents: list[str] = []
+        for sent in sentences:
+            sent = sent.strip()
+            if len(sent) < 20:
+                continue
+            if re.search(
+                r"\b(?:error|result|output|fixed|fix|note|warning|important|"
+                r"must|should|resolved|completed|configured|installed|"
+                r"returns?|raises?|set|use|run|add|remove|decided|conclusion)\b",
+                sent, re.IGNORECASE,
+            ):
+                key_sents.append(f"- {sent}")
+        if key_sents:
+            result_parts.extend(key_sents[:4])
+
+    result = "\n\n".join(result_parts)
+
+    orig_t = turn.tokens()
+    comp_t = int(len(result) / CHARS_PER_TOKEN)
+    if orig_t > comp_t + 30:
+        result = f"[~{orig_t}to{comp_t}t]\n{result}"
+
+    return Turn(role=turn.role, content=result, index=turn.index)
+
+
+# ---- Main prune orchestrator -------------------------------------------------
+
+_PRESCRIPTIONS: dict[str, dict[str, bool]] = {
+    "gentle":     {"dedup": False, "compress": False},
+    "standard":   {"dedup": True,  "compress": False},
+    "aggressive": {"dedup": True,  "compress": True},
+}
+
+
+def prune(
+    turns:        list[Turn],
+    verbatim:     int = DEFAULT_VERBATIM,
+    prescription: str = "standard",
+) -> tuple[list[Turn], PruneStats]:
+    """
+    Main pruning entry point.
+    verbatim: number of most-recent turns to keep untouched.
+    prescription: "gentle" | "standard" | "aggressive"
+    """
+    if prescription not in _PRESCRIPTIONS:
+        prescription = "standard"
+    cfg = _PRESCRIPTIONS[prescription]
+
+    orig_tokens = sum(t.tokens() for t in turns)
+    rules       = extract_rules(turns)
+
+    # Clamp verbatim to [0, len(turns)]
+    verbatim = max(0, min(verbatim, len(turns)))
+
+    if verbatim == 0:
+        old, recent = turns, []
+    elif verbatim >= len(turns):
+        old, recent = [], turns
+    else:
+        old    = turns[:-verbatim]
+        recent = turns[-verbatim:]
+
+    # Process older turns
+    processed: list[Turn] = [clean(t) for t in old]
+    if cfg["dedup"]:
+        processed = deduplicate(processed)
+    if cfg["compress"]:
+        processed = [compress(t) for t in processed]
+
+    # Clean recent turns (noise only; never compress)
+    cleaned_recent = [clean(t) for t in recent]
+
+    final = processed + cleaned_recent
+    # Drop turns that became empty after cleaning
+    final = [t for t in final if t.content.strip()]
+
+    final_tokens = sum(t.tokens() for t in final)
+    saved = orig_tokens - final_tokens
+    pct   = round(saved / orig_tokens * 100, 1) if orig_tokens > 0 else 0.0
+
+    return final, PruneStats(
+        orig_turns   = len(turns),
+        final_turns  = len(final),
+        orig_tokens  = orig_tokens,
+        final_tokens = final_tokens,
+        saved_tokens = saved,
+        saved_pct    = pct,
+        prescription = prescription,
+        verbatim     = verbatim,
+        rules_found  = len(rules),
+        rules        = rules,
+    )
+
+
+# ---- Briefing document generator ---------------------------------------------
+
+def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
+    """
+    Produce a structured briefing document for starting a fresh conversation.
+    Paste this as the first message in a new Claude Desktop chat.
+
+    Structure:
+      1. Compression stats header
+      2. Behavioral rules (extracted corrections) — read first
+      3. Compressed conversation history
+      4. Most recent N turns verbatim
+    """
+    rules    = extract_rules(turns)
+    pruned, stats = prune(turns, verbatim, "aggressive")
+    ts       = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines: list[str] = [
+        "# CONVERSATION BRIEFING",
+        f"*Compressed by context_surgeon v{__version__} on {ts}*",
+        "",
+        f"*Original: {stats.orig_turns} turns, ~{stats.orig_tokens:,} tokens*",
+        f"*Compressed: {stats.final_turns} turns, ~{stats.final_tokens:,} tokens*",
+        f"*Saved: {stats.saved_pct}% | Last {verbatim} turns verbatim*",
+        "",
+        "> **How to use**: Paste this entire document as your first message in a new",
+        "> Claude Desktop conversation. It carries forward your behavioral corrections,",
+        "> compressed history, and verbatim recent context; without the native compact's",
+        "> overgeneralization.",
+        "",
+    ]
+
+    if rules:
+        lines += [
+            "---",
+            "",
+            "## BEHAVIORAL RULES",
+            "*These corrections were explicitly stated during the original conversation.*",
+            "*Apply them throughout this session.*",
+            "",
+        ]
+        lines += [f"- {r}" for r in rules]
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        "## CONVERSATION HISTORY",
+        f"*Older turns: aggressive compression (code blocks always verbatim).*",
+        f"*Last {verbatim} turns: verbatim.*",
+        "",
+    ]
+
+    for turn in pruned:
+        label = "**User**" if turn.role == "user" else "**Assistant**"
+        lines.append(f"{label}: {turn.content}")
+        lines.append("")
+
+    lines += [
+        "---",
+        f"*context_surgeon v{__version__} ; github.com/fishboyrocks/cozempic-2.0*",
+    ]
+
+    return "\n".join(lines)
+
+
+# ---- Diagnosis ---------------------------------------------------------------
+
+def diagnose_text(turns: list[Turn]) -> str:
+    """Return a formatted diagnosis report as a string."""
+    if not turns:
+        return "No turns found."
+
+    total_chars  = sum(len(t.content) for t in turns)
+    total_tokens = sum(t.tokens() for t in turns)
+    ctx_pct      = total_tokens / DEFAULT_CONTEXT_WIN * 100
+
+    thinking_n = sum(1 for t in turns if THINKING_RE.search(t.content))
+    xml_n      = sum(1 for t in turns if XML_NOISE_RE.search(t.content))
+    rules      = extract_rules(turns)
+
+    hashes: dict[str, int] = {}
+    for t in turns:
+        key = hashlib.md5(t.content[:2000].encode("utf-8")).hexdigest()
+        hashes[key] = hashes.get(key, 0) + 1
+    dupes = sum(1 for v in hashes.values() if v > 1)
+
+    top5 = sorted(turns, key=lambda t: t.tokens(), reverse=True)[:5]
+
+    sep   = "-" * 56
+    lines = [
+        sep,
+        "CONTEXT SURGEON -- DIAGNOSIS",
+        sep,
+        f"Turns:              {len(turns)}",
+        f"Characters:         {total_chars:,}",
+        f"Tokens (est.):      {total_tokens:,}",
+        f"Context fill:       {ctx_pct:.1f}%  (200 K window baseline)",
+        "",
+        "Noise detected:",
+        f"  Thinking blocks:  {thinking_n}",
+        f"  XML noise turns:  {xml_n}",
+        f"  Duplicate turns:  {dupes}",
+        f"  Correction rules: {len(rules)}",
+        "",
+        "Largest 5 turns:",
+    ]
+    for t in top5:
+        bar = "#" * min(24, t.tokens() // 200)
+        lines.append(f"  {bar} Turn {t.index:>3} ({t.role:<9}): ~{t.tokens():,} tokens")
+
+    lines += [
+        "",
+        "Estimated savings by prescription:",
+    ]
+    for rx in ("gentle", "standard", "aggressive"):
+        _, s = prune(turns, DEFAULT_VERBATIM, rx)
+        lines.append(
+            f"  {rx:<12}  ~{s.saved_tokens:,} tokens saved  ({s.saved_pct}%)"
+        )
+    lines.append(sep)
+    return "\n".join(lines)
+
+
+# ---- Claude Desktop discovery ------------------------------------------------
+
+def find_data_dirs() -> list[Path]:
+    """Locate all candidate Claude Desktop data directories on this machine."""
+    home = Path.home()
+    candidates: list[Path] = []
+    if sys.platform == "win32":
+        appdata      = os.environ.get("APPDATA")      or str(home / "AppData" / "Roaming")
+        localappdata = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        candidates   = [
+            Path(appdata)      / "Claude",
+            Path(localappdata) / "Claude",
+            home / ".claude",    # Claude Code also uses this; may overlap
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            home / "Library" / "Application Support" / "Claude",
+            home / ".claude",
+        ]
+    else:
+        xdg        = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+        candidates = [
+            Path(xdg) / "Claude",
+            home / ".local" / "share" / "Claude",
+            home / ".claude",
+        ]
+    return [p for p in candidates if p.exists()]
+
+
+def find_mcp_config() -> Path | None:
+    """Locate claude_desktop_config.json."""
+    home = Path.home()
+    if sys.platform == "win32":
+        appdata   = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        candidate = Path(appdata) / "Claude" / "claude_desktop_config.json"
+    elif sys.platform == "darwin":
+        candidate = (
+            home / "Library" / "Application Support"
+            / "Claude" / "claude_desktop_config.json"
+        )
+    else:
+        xdg       = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+        candidate = Path(xdg) / "Claude" / "claude_desktop_config.json"
+    return candidate if candidate.exists() else None
+
+
+# ---- MCP server (pure stdlib; zero external dependencies) --------------------
+
+_TOOLS = [
+    {
+        "name": "diagnose_conversation",
+        "description": (
+            "Analyze a Claude Desktop conversation for context bloat. "
+            "Returns token estimates, noise counts, duplicate turns, and "
+            "savings projections for each prescription tier. "
+            "Supports JSON export, JSONL, or plain User:/Assistant: text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_text": {
+                    "type": "string",
+                    "description": "The conversation to analyze (JSON, JSONL, or plain text)",
+                }
+            },
+            "required": ["conversation_text"],
+        },
+    },
+    {
+        "name": "prune_conversation",
+        "description": (
+            "Surgically prune a conversation to reduce token count without losing nuance. "
+            "Strips thinking blocks and XML noise from all turns; deduplicates repeated content; "
+            "optionally compresses verbose older turns (code blocks are always kept verbatim). "
+            "Keeps the most recent N turns character-perfect. "
+            "Returns the pruned conversation text and statistics."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_text": {"type": "string"},
+                "verbatim_turns": {
+                    "type": "integer",
+                    "description": "Recent turns to keep verbatim (default 10)",
+                    "default": 10,
+                },
+                "prescription": {
+                    "type": "string",
+                    "enum": ["gentle", "standard", "aggressive"],
+                    "description": (
+                        "gentle=noise only; standard=+dedup; "
+                        "aggressive=+compress old turns"
+                    ),
+                    "default": "standard",
+                },
+            },
+            "required": ["conversation_text"],
+        },
+    },
+    {
+        "name": "create_briefing",
+        "description": (
+            "Create a structured briefing document to paste at the start of a fresh conversation. "
+            "Extracts behavioral corrections ('don't do X', 'always Y') and leads with them. "
+            "Compresses old turns aggressively; keeps recent N turns verbatim. "
+            "Use this when your conversation is approaching its context limit; "
+            "paste the output as the first message in a new Claude Desktop chat."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_text": {"type": "string"},
+                "verbatim_turns": {
+                    "type": "integer",
+                    "description": "Recent turns to keep verbatim (default 10)",
+                    "default": 10,
+                },
+            },
+            "required": ["conversation_text"],
+        },
+    },
+    {
+        "name": "extract_rules",
+        "description": (
+            "Extract behavioral correction rules from a conversation. "
+            "Scans for 'don't do X', 'always Y', 'from now on', 'remember that' patterns. "
+            "These are the highest-value content to preserve when resetting context; "
+            "paste them at the top of a new conversation to maintain continuity."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_text": {"type": "string"},
+            },
+            "required": ["conversation_text"],
+        },
+    },
+]
+
+
+def _call_tool(name: str, args: dict) -> str:
+    """Dispatch an MCP tool call and return the result as text."""
+    text  = args.get("conversation_text", "")
+    turns = parse_conversation(text)
+
+    if name == "diagnose_conversation":
+        if not turns:
+            return (
+                "No turns found. Paste the conversation (JSON export, JSONL, "
+                "or User: / Assistant: plain text)."
+            )
+        return diagnose_text(turns)
+
+    if name == "prune_conversation":
+        if not turns:
+            return "No turns found."
+        v  = max(0, int(args.get("verbatim_turns", DEFAULT_VERBATIM)))
+        rx = str(args.get("prescription", "standard"))
+        pruned_turns, stats = prune(turns, v, rx)
+        sep = "-" * 40
+        out: list[str] = [
+            f"Pruned: {stats.orig_turns} to {stats.final_turns} turns | "
+            f"~{stats.orig_tokens:,} to ~{stats.final_tokens:,} tokens | "
+            f"{stats.saved_pct}% saved",
+            "",
+        ]
+        if stats.rules:
+            out.append("Behavioral rules preserved:")
+            out.extend(f"  - {r}" for r in stats.rules)
+            out.append("")
+        out.append("PRUNED CONVERSATION:")
+        out.append(sep)
+        for t in pruned_turns:
+            label = "User" if t.role == "user" else "Assistant"
+            out.append(f"{label}: {t.content}")
+            out.append("")
+        return "\n".join(out)
+
+    if name == "create_briefing":
+        if not turns:
+            return "No turns found."
+        v = max(0, int(args.get("verbatim_turns", DEFAULT_VERBATIM)))
+        return create_briefing(turns, v)
+
+    if name == "extract_rules":
+        if not turns:
+            return "No turns found."
+        rules = extract_rules(turns)
+        if not rules:
+            return "No behavioral correction rules detected in this conversation."
+        sep = "-" * 40
+        out = ["BEHAVIORAL CORRECTIONS:", sep]
+        out.extend(f"{i}. {r}" for i, r in enumerate(rules, 1))
+        return "\n".join(out)
+
+    return f"Unknown tool: {name}"
+
+
+def run_mcp() -> None:
+    """
+    Run as an MCP server using line-delimited JSON-RPC 2.0 over stdio.
+    Handles initialize, tools/list, tools/call, ping.
+    Notifications (no id field) are silently ignored per the MCP spec.
+    """
+    SERVER_INFO = {"name": "context-surgeon", "version": __version__}
+
+    while True:
+        try:
+            raw = sys.stdin.readline()
+        except (KeyboardInterrupt, EOFError):
+            break
+        if not raw:
+            break
+        raw = raw.strip()
+        if not raw:
+            continue
+
+        try:
+            req = json.loads(raw)
+        except json.JSONDecodeError:
+            err = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error"},
+            }
+            sys.stdout.write(json.dumps(err) + "\n")
+            sys.stdout.flush()
+            continue
+
+        req_id = req.get("id")        # None for notifications
+        method = req.get("method", "")
+        params = req.get("params") or {}
+
+        # Per MCP spec: notifications have no id; send no response.
+        if req_id is None:
+            continue
+
+        resp: dict = {"jsonrpc": "2.0", "id": req_id}
+
+        try:
+            if method == "initialize":
+                resp["result"] = {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": SERVER_INFO,
+                }
+            elif method == "tools/list":
+                resp["result"] = {"tools": _TOOLS}
+            elif method == "tools/call":
+                result_text = _call_tool(
+                    params.get("name", ""),
+                    params.get("arguments") or {},
+                )
+                resp["result"] = {
+                    "content": [{"type": "text", "text": result_text}]
+                }
+            elif method == "ping":
+                resp["result"] = {}
+            else:
+                resp["result"] = {}
+        except Exception as exc:
+            resp["error"] = {
+                "code": -32603,
+                "message": f"Internal error: {exc}",
+            }
+
+        sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+# ---- CLI commands ------------------------------------------------------------
+
+def _read_input(path: str) -> str:
+    """Read conversation source from a file path or stdin ('-')."""
+    if path == "-":
+        return sys.stdin.read()
+    p = Path(path)
+    if not p.exists():
+        print(f"Error: file not found: {p}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"Error reading file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_discover(_: argparse.Namespace) -> None:
+    sep = "-" * 56
+    print(f"\nCONTEXT SURGEON -- DISCOVERY\n{sep}")
+
+    dirs = find_data_dirs()
+    if dirs:
+        for d in dirs:
+            print(f"\nFound: {d}")
+            try:
+                items = sorted(d.rglob("*"))
+            except PermissionError:
+                print("  (permission denied reading directory contents)")
+                continue
+            for item in items[:60]:
+                if not item.is_file():
+                    continue
+                try:
+                    kb = item.stat().st_size // 1024
+                except OSError:
+                    kb = 0
+                flag = ""
+                suf    = item.suffix.lower()
+                name_l = item.name.lower()
+                if suf in (".db", ".sqlite", ".sqlite3"):
+                    flag = "  <- SQLite database"
+                elif suf == ".jsonl":
+                    flag = "  <- JSONL session (cozempic-compatible)"
+                elif "config" in name_l and suf == ".json":
+                    flag = "  <- Config file"
+                elif any(k in str(item).lower() for k in ("indexeddb", "leveldb")):
+                    flag = "  <- LevelDB / IndexedDB"
+                try:
+                    rel = item.relative_to(d)
+                    print(f"  {rel}  ({kb} KB){flag}")
+                except ValueError:
+                    print(f"  {item}  ({kb} KB){flag}")
+    else:
+        print("No Claude Desktop data directory found.")
+        print("Is Claude Desktop installed?")
+
+    print()
+    cfg = find_mcp_config()
+    if cfg:
+        print(f"MCP config: {cfg}")
+        try:
+            with open(cfg, encoding="utf-8") as f:
+                data = json.load(f)
+            svrs = data.get("mcpServers", {})
+            print(f"  Configured servers: {', '.join(svrs) or '(none)'}")
+        except Exception:
+            print("  (could not parse config file)")
+    else:
+        print("MCP config: not found -- run setup-mcp to create it.")
+
+    print(f"\nPython: {sys.version}")
+    print(f"Platform: {sys.platform} / {platform.machine()}")
+
+
+def cmd_diagnose(args: argparse.Namespace) -> None:
+    source = _read_input(args.file)
+    turns  = parse_conversation(source)
+    if not turns:
+        print(
+            "No turns found. Supported formats: JSON, JSONL, "
+            "plain text (User: / Assistant: alternation).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(diagnose_text(turns))
+
+
+def cmd_prune(args: argparse.Namespace) -> None:
+    source = _read_input(args.file)
+    turns  = parse_conversation(source)
+    if not turns:
+        print("No turns found.", file=sys.stderr)
+        sys.exit(1)
+
+    briefing = create_briefing(turns, args.verbatim)
+    _, stats  = prune(turns, args.verbatim, args.rx)
+
+    sep = "-" * 56
+    print(sep, file=sys.stderr)
+    print("PRUNING COMPLETE", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print(f"Turns:   {stats.orig_turns} -> {stats.final_turns}", file=sys.stderr)
+    print(f"Tokens:  ~{stats.orig_tokens:,} -> ~{stats.final_tokens:,}", file=sys.stderr)
+    print(f"Saved:   ~{stats.saved_tokens:,} tokens  ({stats.saved_pct}%)", file=sys.stderr)
+    print(f"Rules:   {stats.rules_found} behavioral corrections preserved", file=sys.stderr)
+    for r in stats.rules[:5]:
+        print(f"         -> {r[:72]}", file=sys.stderr)
+    print(sep, file=sys.stderr)
+
+    output_path = getattr(args, "output", None)
+    if output_path:
+        Path(output_path).write_text(briefing, encoding="utf-8")
+        print(f"\nBriefing saved -> {output_path}", file=sys.stderr)
+        print(
+            "Paste its contents as the first message in a new "
+            "Claude Desktop conversation.",
+            file=sys.stderr,
+        )
+    else:
+        print(briefing)
+
+
+def cmd_setup_mcp(_: argparse.Namespace) -> None:
+    """Register context_surgeon.py as a Claude Desktop MCP server."""
+    script  = str(Path(sys.argv[0]).resolve())
+    python  = sys.executable
+
+    cfg_path = find_mcp_config()
+    if cfg_path is None:
+        # Create the config file in the expected location
+        home = Path.home()
+        if sys.platform == "win32":
+            appdata  = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+            cfg_path = Path(appdata) / "Claude" / "claude_desktop_config.json"
+        elif sys.platform == "darwin":
+            cfg_path = (
+                home / "Library" / "Application Support"
+                / "Claude" / "claude_desktop_config.json"
+            )
+        else:
+            xdg      = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+            cfg_path = Path(xdg) / "Claude" / "claude_desktop_config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        config: dict = {}
+    else:
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            config = {}
+
+    if "mcpServers" not in config:
+        config["mcpServers"] = {}
+
+    config["mcpServers"]["context-surgeon"] = {
+        "command": python,
+        "args":    [script, "--mcp"],
+    }
+
+    # Backup before writing
+    if cfg_path.exists():
+        ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = cfg_path.with_suffix(f".{ts}.bak")
+        shutil.copy2(cfg_path, backup)
+        print(f"Config backed up -> {backup}")
+
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    print(f"\ncontext-surgeon registered in:\n  {cfg_path}")
+    print("\nNext step: restart Claude Desktop.")
+    print("\nAvailable MCP tools after restart:")
+    for t in _TOOLS:
+        print(f"  {t['name']}")
+    print("\nWorkflow:")
+    print("  1. Conversation approaching its context limit?")
+    print("     Call create_briefing with your conversation text pasted in.")
+    print("  2. Start a new conversation; paste the briefing as the first message.")
+    print("  3. Continue -- full context headroom, no nuance lost.")
+    print("\nOr use the CLI directly (no MCP needed):")
+    print(f"  python {script} prune conversation.txt --output briefing.md")
+
+
+# ---- CLI parser --------------------------------------------------------------
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="context_surgeon",
+        description=(
+            "Surgical context cleaning for Claude Desktop. "
+            "Scalpel precision; not the native compact's sledgehammer."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent(f"""
+        EXAMPLES
+          python context_surgeon.py discover
+          python context_surgeon.py diagnose conversation.json
+          python context_surgeon.py prune conversation.json
+          python context_surgeon.py prune conversation.txt --verbatim 15 --rx aggressive
+          python context_surgeon.py prune conversation.txt --output briefing.md
+          python context_surgeon.py prune - < pasted_convo.txt
+          python context_surgeon.py setup-mcp
+
+        PRESCRIPTIONS
+          gentle      strip thinking blocks + XML noise only
+          standard    + deduplicate repeated-content turns        [default]
+          aggressive  + compress verbose older turns
+                        (code blocks are ALWAYS kept verbatim)
+
+        v{__version__} -- github.com/fishboyrocks/cozempic-2.0
+        """),
+    )
+    p.add_argument("--mcp",     action="store_true", help="Run as MCP server (stdio transport)")
+    p.add_argument("--version", action="version",    version=f"context_surgeon {__version__}")
+
+    sub = p.add_subparsers(dest="command")
+
+    sub.add_parser("discover",   help="Find Claude Desktop data directories + MCP config")
+
+    pd = sub.add_parser("diagnose", help="Analyze a conversation for bloat and savings potential")
+    pd.add_argument("file", help="Conversation file or - for stdin")
+
+    pp = sub.add_parser("prune", help="Prune and generate a fresh-start briefing document")
+    pp.add_argument("file", help="Conversation file or - for stdin")
+    pp.add_argument(
+        "--verbatim", type=int, default=DEFAULT_VERBATIM,
+        help=f"Recent turns to preserve verbatim (default {DEFAULT_VERBATIM})",
+    )
+    pp.add_argument(
+        "--rx", choices=list(_PRESCRIPTIONS), default="standard",
+        help="Pruning prescription (default: standard)",
+    )
+    pp.add_argument(
+        "--output", "-o", metavar="FILE",
+        help="Save briefing to this file (default: stdout)",
+    )
+
+    sub.add_parser("setup-mcp", help="Register as a Claude Desktop MCP server (run once; then restart Claude Desktop)")
+    return p
+
+
+# ---- Entry point -------------------------------------------------------------
+
+def main() -> None:
+    check_prerequisites()
+    parser = _build_parser()
+    args   = parser.parse_args()
+
+    if args.mcp:
+        run_mcp()
+        return
+
+    commands = {
+        "discover":  cmd_discover,
+        "diagnose":  cmd_diagnose,
+        "prune":     cmd_prune,
+        "setup-mcp": cmd_setup_mcp,
+    }
+
+    if args.command in commands:
+        commands[args.command](args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
