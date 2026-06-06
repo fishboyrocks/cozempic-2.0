@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.0
+context_surgeon.py  v1.0.1
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -66,7 +66,10 @@ INPUT FORMATS
   JSON    Claude.ai / Claude Desktop export, or raw Claude API
           messages array: [{"role":"user","content":"..."}, ...]
   JSONL   Claude Code session (partial compatibility)
-  Text    User: ... / Human: ... / Assistant: ... / Claude: ...
+  Text    User: / You: / **User**: / **Assistant**: / Claude: ...
+          Solo-line labels (You on its own line, then message text)
+          Date-separator fallback (May 16 / Jun 3 style; Claude Desktop
+          copy-paste; dates mark assistant-response starts)
   Stdin   Pass - as the filename to read from stdin
 
 PRESCRIPTIONS
@@ -78,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.0 | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.1 | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -109,7 +112,7 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
-__version__         = "1.0.0"
+__version__         = "1.0.1"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -132,6 +135,42 @@ XML_NOISE_RE = re.compile(
 )
 
 CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
+
+# ---- v1.0.1 text-parser patterns --------------------------------------------
+# NOTE: Python's re module does NOT support variable-length lookbehinds.
+# We anchor with ^ + re.MULTILINE instead, which is equivalent and correct.
+# \s* after ^ also consumes any stray \r left from Windows CRLF line endings.
+
+# Format 1: colon-separated role labels.
+# Handles plain ("User: "), markdown-bold ("**Assistant**: "), "You: ",
+# timestamped variants ("[2:30 PM] You: "), and Claude model names
+# ("Claude Sonnet 4.6: ").  Captured group 1 = raw role string.
+_COLON_RE = re.compile(
+    r"^\s*"
+    r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional leading [time]
+    r"(?:\*\*|__)?"                                    # optional **/__
+    r"(You|User|Human|Assistant|Claude(?:\s+[A-Za-z0-9][A-Za-z0-9.]*){0,3}|AI)"
+    r"(?:\*\*|__)?"                                    # optional closing **/__
+    r"\s*(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"    # optional trailing [time]
+    r":\s*",                                           # required colon
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Format 2: solo-line labels — "You" or "Claude" alone on a line, no colon.
+# Claude Desktop copy-paste sometimes produces this exact format.
+_SOLO_RE = re.compile(
+    r"^\s*(You|User|Human|Assistant|Claude(?:\s+[A-Za-z0-9][A-Za-z0-9.]*){0,3}|AI)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Format 3: Claude Desktop date-separator fallback.
+# Claude Desktop inserts a bare "Month Day" line before each assistant
+# response in copy-paste output.  Used only when Formats 1 and 2 find
+# no recognizable role labels at all.
+_DATE_RE = re.compile(
+    r"^\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Patterns that signal a behavioral correction in a user turn.
 # Word boundaries (\b) prevent false matches inside longer words.
@@ -246,7 +285,10 @@ def parse_conversation(source: str) -> list[Turn]:
 
 def _normalize_role(raw: str) -> str:
     r = raw.strip().lower()
-    if r in ("human", "user"):
+    # "Claude Sonnet 4.6", "Claude Opus 4", etc. → assistant
+    if r.startswith("claude"):
+        r = "claude"
+    if r in ("human", "user", "you"):
         return "user"
     if r in ("assistant", "claude", "ai"):
         return "assistant"
@@ -339,31 +381,123 @@ def _parse_jsonl(source: str) -> list[Turn]:
     return turns
 
 
-def _parse_text(source: str) -> list[Turn]:
-    pattern = re.compile(
-        r"^(User|Human|Assistant|Claude|AI)\s*:\s*",
-        re.IGNORECASE | re.MULTILINE,
-    )
-    parts = pattern.split(source)
-
-    if len(parts) < 3:
-        content = source.strip()
-        return [Turn(role="user", content=content, index=0)] if content else []
-
+def _turns_from_matches(
+    matches: list[re.Match],
+    source: str,
+    role_fn,          # callable(match) -> "user" | "assistant"
+) -> list[Turn]:
+    """
+    Slice *source* into Turn objects using pre-computed regex match objects
+    as turn-start markers.  Content runs from match.end() to the start of
+    the next match (or EOF for the final turn).  Preamble before the first
+    match is discarded automatically.  All Turn fields are keyword-assigned
+    to satisfy the dataclass field ordering (index has a default; using
+    positional args would require matching field order exactly).
+    """
     turns: list[Turn] = []
     idx = 0
-    i   = 1
-    while i + 1 < len(parts):
-        role    = _normalize_role(parts[i])
-        content = parts[i + 1].strip()
-        if role not in ("user", "assistant"):
-            role = "user"
+    for i, m in enumerate(matches):
+        role          = role_fn(m)
+        content_start = m.end()
+        content_end   = matches[i + 1].start() if i + 1 < len(matches) else len(source)
+        content       = source[content_start:content_end].strip()
         if content:
             turns.append(Turn(role=role, content=content, index=idx))
             idx += 1
-        i += 2
-
     return turns
+
+
+def _parse_text(source: str) -> list[Turn]:
+    """
+    Parse a plain-text conversation into Turn objects.
+
+    Three formats attempted in priority order:
+
+    Format 1 — colon labels (most specific; tried first):
+        "User: text"   "You: text"   "Claude: text"
+        "**User**: text"  "**Assistant**: text"   (tool's own briefing output)
+        "[2:30 PM] You: text"                      (timestamped variants)
+        "Claude Sonnet 4.6: text"                  (model-name variants)
+
+    Format 2 — solo-line labels (no colon; Claude Desktop native):
+        A bare "You" or "Claude" alone on its own line, followed by the
+        message text on subsequent lines.
+
+    Format 3 — date-separator fallback (Claude Desktop copy-paste):
+        "May 16" / "Jun 3" on its own line marks the START of each
+        assistant response.  Content before the first date = user turn 0
+        (never dropped).  Each subsequent inter-date block = assistant turn.
+        NOTE: inter-date blocks may contain a concatenated Claude response
+        AND the user's next message when no solo-line labels are present.
+        Role assignment is approximate in this mode; treat briefings produced
+        by Format 3 as structural scaffolds, not ground-truth transcripts.
+
+    Frontmatter strip:
+        If the source is one of this tool's own briefing documents, strip
+        everything up through the "## CONVERSATION HISTORY" header line
+        before running pattern scans, so the header/rules metadata does not
+        create false turn splits.  Case-insensitive; handles both "##
+        CONVERSATION HISTORY" and "## Conversation History" variants.
+    """
+    # ---- Frontmatter strip (case-insensitive) --------------------------------
+    lower    = source.lower()
+    ch_pos   = lower.find("## conversation history")
+    if ch_pos != -1:
+        newline_after = source.find("\n", ch_pos)
+        source = source[newline_after + 1:] if newline_after != -1 else source[ch_pos:]
+
+    # ---- Format 1: colon-separated role labels --------------------------------
+    colon_matches = list(_COLON_RE.finditer(source))
+    if len(colon_matches) >= 2:
+        return _turns_from_matches(
+            colon_matches,
+            source,
+            role_fn=lambda m: _normalize_role(m.group(1)),
+        )
+
+    # ---- Format 2: solo-line role labels (no colon) --------------------------
+    solo_matches = list(_SOLO_RE.finditer(source))
+    if len(solo_matches) >= 2:
+        return _turns_from_matches(
+            solo_matches,
+            source,
+            role_fn=lambda m: _normalize_role(m.group(1)),
+        )
+
+    # ---- Format 3: Claude Desktop date-separator fallback --------------------
+    date_matches = list(_DATE_RE.finditer(source))
+    if date_matches:
+        turns: list[Turn] = []
+        idx = 0
+        # Capture content BEFORE the first date separator as user turn 0.
+        pre = source[:date_matches[0].start()].strip()
+        if pre:
+            turns.append(Turn(role="user", content=pre, index=idx))
+            idx += 1
+        # Each post-date block is labeled assistant (dates precede Claude responses).
+        for i, m in enumerate(date_matches):
+            content_start = m.end()
+            content_end   = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(source)
+            chunk = source[content_start:content_end].strip()
+            if chunk:
+                turns.append(Turn(role="assistant", content=chunk, index=idx))
+                idx += 1
+        if len(turns) >= 2:
+            return turns
+
+    # ---- Single-match edge case: use it rather than dropping the label -------
+    if colon_matches:
+        return _turns_from_matches(
+            colon_matches, source, role_fn=lambda m: _normalize_role(m.group(1))
+        )
+    if solo_matches:
+        return _turns_from_matches(
+            solo_matches, source, role_fn=lambda m: _normalize_role(m.group(1))
+        )
+
+    # ---- Fallback: single blob ------------------------------------------------
+    content = source.strip()
+    return [Turn(role="user", content=content, index=0)] if content else []
 
 
 # ---- Content cleaning --------------------------------------------------------
