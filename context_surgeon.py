@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.1
+context_surgeon.py  v1.0.2
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.1 | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.2 | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
-__version__         = "1.0.1"
+__version__         = "1.0.2"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -170,6 +170,49 @@ _SOLO_RE = re.compile(
 _DATE_RE = re.compile(
     r"^\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s*$",
     re.IGNORECASE | re.MULTILINE,
+)
+
+# ---- v1.0.2 gentle / standard prescription patterns -------------------------
+
+# Boilerplate opening phrases stripped from assistant turns in all prescriptions.
+# Matches the first sentence/line when it is pure acknowledgment with no content.
+_BOILERPLATE_OPEN_RE = re.compile(
+    r"^\s*"
+    r"(?:Of course[!,]?\s+|Certainly[!,]?\s+|Sure[!,]?\s+|Absolutely[!,]?\s+|"
+    r"Great(?:\s+question)?[!,]?\s+)"
+    r"[^\n]*\n\n?",
+    re.IGNORECASE,
+)
+_BOILERPLATE_OPENV2_RE = re.compile(
+    r"^\s*(?:I'?(?:'ll|'d)(?: be)? (?:happy|glad|delighted)(?: to)? (?:help|analyze|review|look at|work through)[^\n]*\n\n?"
+    r"|Let me (?:carefully |thoroughly |systematically )?(?:analyze|review|work through|look at|help|walk you through)[^\n]*\n\n?"
+    r"|I'?(?:'ve)? (?:carefully |thoroughly )?(?:reviewed|analyzed|evaluated|gone through|looked at)[^\n]*\n\n?)",
+    re.IGNORECASE,
+)
+
+# Boilerplate closing phrases stripped from assistant turns in all prescriptions.
+_BOILERPLATE_CLOSE_RE = re.compile(
+    r"\n+(?:(?:Let|Please let) me know(?: if| what| how)[^\n]*"
+    r"|(?:Feel|Please feel) free to (?:ask|let me know|reach out|share)[^\n]*"
+    r"|(?:I )?[Hh]ope this (?:helps?|(?:has been|was) helpful|gives?|provides?)[^\n]*"
+    r"|[Ii]'?(?:'m|'ll) (?:here|happy|available|glad)(?: to)? (?:help|assist|answer|make|revisit|adjust)[^\n]*"
+    r"|[Hh]appy to (?:help|assist|elaborate|dive|explore|clarify|discuss|revisit|adjust)[^\n]*"
+    r"|[Ww]ould you like (?:me to|to)[^\n]*"
+    r"|[Ii]s there anything (?:else|more|other)[^\n]*"
+    r"|[Ww]ant me to[^\n]*)"
+    r"[.!?]?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Standard prescription only: strip pure acknowledgment openers before the
+# actual content begins.  Targets turns that open with "Yes, you're right" /
+# "I understand" / "That's a good point" before giving substantive response.
+_ACK_OPENER_RE = re.compile(
+    r"^\s*(?:Yes(?:,| -)? (?:you(?:'re| are) right|absolutely|exactly|that(?:'s| is) (?:correct|a good point|fair))[^\n]*\n\n?"
+    r"|I(?: fully)? understand[^\n]*\n\n?"
+    r"|That(?:'s| is)(?: a)? (?:great|good|fair|excellent|valid)[^\n]*\n\n?"
+    r"|You(?:'re| are)(?: absolutely| totally)? right[^\n]*\n\n?)",
+    re.IGNORECASE,
 )
 
 # Patterns that signal a behavioral correction in a user turn.
@@ -518,20 +561,103 @@ def clean(turn: Turn) -> Turn:
     return Turn(role=turn.role, content=c, index=turn.index)
 
 
+def strip_boilerplate(text: str) -> str:
+    """
+    Remove common LLM opening/closing filler from an assistant turn.
+    Applied by the gentle prescription (and inherited by standard/aggressive).
+
+    Targets:
+      - Opening: "Of course!", "Certainly!", "I'd be happy to analyze..."
+      - Opening v2: "Let me carefully review...", "I've thoroughly looked at..."
+      - Closing: "Let me know if you need anything", "Feel free to ask", "Hope this helps"
+    """
+    # Strip boilerplate opening (first line only; count=1 prevents greedy sweep)
+    text = _BOILERPLATE_OPEN_RE.sub("", text, count=1)
+    text = _BOILERPLATE_OPENV2_RE.sub("", text, count=1)
+    # Strip boilerplate closing (last matching line)
+    text = _BOILERPLATE_CLOSE_RE.sub("", text)
+    return text.strip()
+
+
+def strip_acknowledgment(text: str) -> str:
+    """
+    Remove pure acknowledgment openers from an assistant turn.
+    Applied by the standard prescription (in addition to strip_boilerplate).
+
+    Targets first sentences that are entirely reactive with no actual content:
+    "Yes, you're right about that.", "I understand.", "That's a great point."
+    """
+    return _ACK_OPENER_RE.sub("", text, count=1).strip()
+
+
 # ---- Behavioral rule extraction ----------------------------------------------
 
 def _sentence_around(text: str, start: int, end: int) -> str:
-    """Extract the full sentence containing the match at [start, end)."""
-    # Walk left to the previous sentence boundary
+    """
+    Extract the sentence containing the match at [start, end).
+
+    v1.0.2 fix: the old implementation capped the left boundary at
+    'start-250', which truncated sentence beginnings whenever the previous
+    sentence-end punctuation was more than 250 chars away — causing "mid-word"
+    starts and dropped parentheticals like "I had a lumbar spinal fusion (with
+    hardware ... years of rehab), so I have..." being returned as
+    "years of rehab), so I have...".
+
+    Fix: determine the left boundary from the most recent sentence-end marker
+    (newline or period) before the match, with NO distance cap.  Cap the
+    TOTAL extracted string at MAX_RULE_LEN chars instead, trimming from the
+    right and re-anchoring around the keyword when it sits far from the
+    sentence start.
+    """
+    # ---- left boundary: most recent sentence-end marker before match --------
     left_dot = text.rfind(".", 0, start)
-    left     = max(left_dot + 1, max(0, start - 250))
-    # Walk right to the next sentence boundary
-    right_dot = text.find(".", end)
-    if right_dot == -1 or (right_dot - end) > 250:
-        right = min(len(text), end + 250)
+    left_nl  = text.rfind("\n", 0, start)
+
+    if left_dot != -1 and left_nl != -1:
+        # Take whichever is closer to start (the more recent sentence boundary)
+        raw_left = max(left_dot + 1, left_nl + 1)
+    elif left_dot != -1:
+        raw_left = left_dot + 1
+    elif left_nl != -1:
+        raw_left = left_nl + 1
     else:
+        raw_left = 0
+
+    # Consume leading whitespace that follows the boundary marker
+    while raw_left < start and text[raw_left] in " \t":
+        raw_left += 1
+    left = raw_left
+
+    # ---- right boundary: next sentence-end marker after match ---------------
+    right_dot = text.find(".", end)
+    right_nl  = text.find("\n", end)
+
+    if right_dot != -1 and right_nl != -1:
+        right = min(right_dot + 1, right_nl)
+    elif right_dot != -1:
         right = right_dot + 1
-    return text[left:right].strip()
+    elif right_nl != -1:
+        right = right_nl
+    else:
+        right = len(text)
+
+    result = text[left:right].strip()
+
+    # ---- MAX_RULE_LEN cap: trim from right; re-anchor if keyword is far in --
+    if len(result) > MAX_RULE_LEN:
+        kw_offset = start - left
+        if kw_offset > MAX_RULE_LEN // 2:
+            # Keyword is deep in the sentence; shift window to keep it visible
+            new_left = max(left, start - MAX_RULE_LEN // 2)
+            result   = text[new_left:right].strip()
+        if len(result) > MAX_RULE_LEN:
+            trimmed    = result[:MAX_RULE_LEN]
+            last_space = trimmed.rfind(" ")
+            if last_space > MAX_RULE_LEN - 40:
+                trimmed = trimmed[:last_space]
+            result = trimmed + "…"
+
+    return result
 
 
 def extract_rules(turns: list[Turn]) -> list[str]:
@@ -653,9 +779,9 @@ def compress(turn: Turn) -> Turn:
 # ---- Main prune orchestrator -------------------------------------------------
 
 _PRESCRIPTIONS: dict[str, dict[str, bool]] = {
-    "gentle":     {"dedup": False, "compress": False},
-    "standard":   {"dedup": True,  "compress": False},
-    "aggressive": {"dedup": True,  "compress": True},
+    "gentle":     {"boilerplate": True,  "acknowledge": False, "dedup": False, "compress": False},
+    "standard":   {"boilerplate": True,  "acknowledge": True,  "dedup": True,  "compress": False},
+    "aggressive": {"boilerplate": True,  "acknowledge": True,  "dedup": True,  "compress": True},
 }
 
 
@@ -688,7 +814,18 @@ def prune(
         recent = turns[-verbatim:]
 
     # Process older turns
-    processed: list[Turn] = [clean(t) for t in old]
+    processed: list[Turn] = []
+    for t in old:
+        c = clean(t)
+        if cfg["boilerplate"] and c.role == "assistant":
+            stripped = strip_boilerplate(c.content)
+            if stripped:
+                c = Turn(role=c.role, content=stripped, index=c.index)
+        if cfg["acknowledge"] and c.role == "assistant":
+            stripped = strip_acknowledgment(c.content)
+            if stripped:
+                c = Turn(role=c.role, content=stripped, index=c.index)
+        processed.append(c)
     if cfg["dedup"]:
         processed = deduplicate(processed)
     if cfg["compress"]:
