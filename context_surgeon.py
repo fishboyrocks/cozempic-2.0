@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.2
+context_surgeon.py  v1.0.3-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.2 | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.3-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
-__version__         = "1.0.2"
+__version__         = "1.0.3-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -214,6 +214,18 @@ _ACK_OPENER_RE = re.compile(
     r"|You(?:'re| are)(?: absolutely| totally)? right[^\n]*\n\n?)",
     re.IGNORECASE,
 )
+
+# ---- v1.0.3-alpha: Claude Desktop copy-paste UI artifact stripping ----------
+# Verified against a real 298,608-char / 34-turn Claude Desktop export
+# (Ctrl+A/Ctrl+C/Ctrl+V capture): 36 doubled thinking-summary-line pairs
+# (max 107 chars, e.g. "Analyzed ten outfits against transgender passing
+# criteria systematically" appearing twice in a row) and 12 standalone
+# "Show more" truncation-button labels, none carrying information not
+# already present in the surrounding turn content.  Applied unconditionally
+# in clean() so it benefits every prescription AND verbatim/recent turns
+# without affecting the verbatim guarantee (pure UI chrome, zero content).
+_DUP_LINE_MAX_LEN = 200  # generous margin above the 107-char observed max;
+                          # longer duplicate blocks are deduplicate()'s job
 
 # Patterns that signal a behavioral correction in a user turn.
 # Word boundaries (\b) prevent false matches inside longer words.
@@ -553,10 +565,44 @@ def strip_xml_noise(text: str) -> str:
     return XML_NOISE_RE.sub("", text).strip()
 
 
+def strip_ui_artifacts(text: str) -> str:
+    """
+    Remove Claude Desktop copy-paste UI chrome: the literal "Show more"
+    expand-button label, and doubled thinking-summary lines (Claude Desktop
+    renders the collapsed-thinking summary as both a label element and
+    flattened text, so Ctrl+A/Ctrl+C/Ctrl+V produces it twice in a row).
+
+    Only collapses adjacent duplicate lines at or under _DUP_LINE_MAX_LEN
+    chars, so legitimate longer repeated content is left to deduplicate().
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line     = lines[i]
+        stripped = line.strip()
+        if stripped == "Show more":
+            i += 1
+            continue
+        if (
+            stripped
+            and i + 1 < len(lines)
+            and lines[i + 1].strip() == stripped
+            and len(stripped) <= _DUP_LINE_MAX_LEN
+        ):
+            out.append(line)
+            i += 2
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def clean(turn: Turn) -> Turn:
     """Remove noise from a turn without compressing any content."""
     c = strip_thinking(turn.content)
     c = strip_xml_noise(c)
+    c = strip_ui_artifacts(c)
     c = re.sub(r"\n{3,}", "\n\n", c).strip()
     return Turn(role=turn.role, content=c, index=turn.index)
 
