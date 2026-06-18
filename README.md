@@ -304,10 +304,46 @@ Use the command line for:
 
 ---
 
-## Version History
+## Update — v1.0.1 (June 2026): Parser Overhaul
 
-Detailed version history, including what changed and why, now lives in [`CHANGELOG.md`](CHANGELOG.md). That file is the single source of truth for all future updates; this README will not accumulate per-version prose sections going forward.
+### The Root Cause: Why Every Briefing Showed "Turns: 1 / 0% Saved"
+
+The v1.0.0 `_parse_text` function only recognized `User:` and `Claude:` (no markdown bold, no `You:`, no model-name variants) using `pattern.split()`. Claude Desktop's copy-paste output uses `**User**: ` / `**Assistant**: ` (markdown bold with a colon) in the tool's own briefing format, and may output `You` or `Claude Sonnet 4.6` solo on a line (no colon) for its native copy-paste format. Neither matched. The entire conversation fell through to the single-blob fallback — one giant user turn, 0% savings regardless of `--verbatim` or `--rx` setting.
+
+### What Changed
+
+**Three-format `finditer` parser replacing the old `split` approach:**
+
+Format 1 handles colon-delimited role labels including markdown bold. These patterns are all equivalent to it: `User: text`, `You: text`, `**User**: text`, `**Assistant**: text`, `[2:30 PM] You: text`, `Claude Sonnet 4.6: text`. The regex uses `re.MULTILINE` with `^` anchoring — not the variable-length lookbehind (`(?<=^|[\r\n])`) that appeared in earlier debugging attempts. That lookbehind is syntactically invalid in Python's `re` module and raises `re.error: look-behind requires fixed width pattern` at runtime. The `re.MULTILINE + ^` approach is equivalent and is the correct Python idiom.
+
+Format 2 handles solo-line role labels with no colon — `You` or `Claude` alone on their own line, which Claude Desktop sometimes produces in raw copy-paste output.
+
+Format 3 is a date-separator fallback for Claude Desktop's native copy-paste format. Claude Desktop inserts a bare month-day line (e.g. `May 16`) immediately before each assistant response. The parser captures content before the first date as user turn 0 (previously this was silently dropped — a data-loss bug in the earlier proposed implementation), then labels each post-date block as an assistant turn. This makes the savings metric move when processing Claude Desktop copy-paste output that has no explicit role labels.
+
+**Important limitation of Format 3:** each inter-date block typically contains Claude's response followed immediately by the user's next message. No additional marker separates them. The parser labels the entire block as `assistant`, which means the user's follow-up gets concatenated into the assistant turn. Role assignments in Format 3 output are structural approximations; use the briefing as a context scaffold, not as a ground-truth transcript.
+
+**`_normalize_role` update:** now maps `"you"` → `user` and any `"claude X"` variant (Claude Sonnet 4.6, Claude Opus, etc.) → `assistant`.
+
+**Frontmatter strip:** before any pattern scan, `_parse_text` now strips everything through the `## CONVERSATION HISTORY` header using a case-insensitive search. The v1.0.0 briefing format uses all-caps; a case-sensitive string comparison (as in earlier proposed implementations) would silently fail and leave the header and behavioral rules section in the parse stream, generating false positive matches.
+
+**Keyword-safe `Turn` construction:** the helper `_turns_from_matches` uses `Turn(role=..., content=..., index=...)` exclusively. Positional instantiation is fragile against field reordering in the dataclass; keyword assignment is required for safety.
+
+### How to Verify the Fix
+
+Run diagnose against your **original `conversation.txt`**, not the briefings generated before this fix. Those briefings all contain exactly one turn (the entire conversation labeled `**User**: [blob]`) because they were produced before the parser was fixed. Re-running prune on a briefing from v1.0.0 will still show 1 turn — not because the fix failed, but because the briefing itself has no internal turn markers to split on. The correct test input is the file you originally fed to the tool:
+
+```
+python context_surgeon.py diagnose conversation.txt
+```
+
+If `Turns:` is now greater than 1, the parser is working. Run the full prune from there:
+
+```
+python context_surgeon.py prune conversation.txt --verbatim 10 --rx aggressive --output briefing.md
+```
+
+If `Turns:` is still 1 after this update, the `conversation.txt` contains no format the parser can detect. In that case, open the file in Notepad, locate the boundary between your first message and Claude's first response, and add `You:` on a blank line before your messages and `Claude:` before Claude's responses. Even tagging just the first exchange confirms the format works for the rest of the file.
 
 ---
 
-*Context Surgeon; github.com/fishboyrocks/cozempic-2.0; see `CHANGELOG.md` for current version and history.*
+*Context Surgeon v1.0.1; github.com/fishboyrocks/cozempic-2.0*
