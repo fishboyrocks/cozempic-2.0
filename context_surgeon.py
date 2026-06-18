@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.4-alpha
+context_surgeon.py  v1.0.4
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.4-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.4 | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
-__version__         = "1.0.4-alpha"
+__version__         = "1.0.4"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
