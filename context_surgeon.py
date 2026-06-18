@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.3-alpha
+context_surgeon.py  v1.0.4-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.3-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.4-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -100,20 +100,6 @@ from datetime import datetime
 from pathlib import Path
 
 
-def _safe_env_base(env_var: str, default: Path, trusted_root: Path) -> Path:
-    """Return env path only if it resolves within trusted_root; else default."""
-    raw = os.environ.get(env_var)
-    if not raw:
-        return default
-    try:
-        candidate = Path(raw).expanduser().resolve(strict=False)
-        root = trusted_root.expanduser().resolve(strict=False)
-        candidate.relative_to(root)
-        return candidate
-    except (OSError, RuntimeError, ValueError):
-        return default
-
-
 # ---- Windows UTF-8 fix -------------------------------------------------------
 # Without this, MCP JSON-RPC over stdio silently mangles non-ASCII on Windows
 # (default cp1252 encoding). Must run before any I/O.
@@ -126,7 +112,7 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
-__version__         = "1.0.3-alpha"
+__version__         = "1.0.4-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -240,6 +226,16 @@ _ACK_OPENER_RE = re.compile(
 # without affecting the verbatim guarantee (pure UI chrome, zero content).
 _DUP_LINE_MAX_LEN = 200  # generous margin above the 107-char observed max;
                           # longer duplicate blocks are deduplicate()'s job
+
+# ---- v1.0.4-alpha: exact-repeat paragraph/sentence collapsing (standard+) ---
+# Splits on sentence-end+capital OR blank-line breaks, so a varying label
+# ("Note I wrote to stylist:" vs "Your revised note:") doesn't block
+# detection of identical inner content that follows it.
+_REPEAT_SPLIT_RE  = re.compile(r'((?<=[.!?])\s+(?=[A-Z])|\n{2,})')
+_MIN_COLLAPSE_LEN = 60  # chars; keeps short per-item verdicts ("Select it.",
+                          # "Reject it.") untouched -- those are real per-item
+                          # decisions, not redundant restatement, even when
+                          # they repeat verbatim across many outfits/items.
 
 # Patterns that signal a behavioral correction in a user turn.
 # Word boundaries (\b) prevent false matches inside longer words.
@@ -766,6 +762,69 @@ def deduplicate(turns: list[Turn]) -> list[Turn]:
     return [t for i, t in enumerate(turns) if i in keep]
 
 
+def collapse_exact_repeats(turns: list[Turn]) -> list[Turn]:
+    """
+    Collapse EXACT (whitespace-normalized) repeated text chunks that recur
+    across different assistant turns, keeping the FIRST occurrence in full
+    and replacing later occurrences with a compact, self-contained marker.
+    Unlike deduplicate() (whole-turn, keeps latest), this works at
+    sentence/paragraph granularity within otherwise-unique turns and keeps
+    the first occurrence, since a briefing is read top-to-bottom and the
+    first appearance is where the context is actually established.
+
+    Deliberately EXACT-match only, never fuzzy/near-duplicate. A fuzzy pass
+    using difflib.SequenceMatcher was built and tested against a real
+    conversation before this was written, and rejected: even at 0.90-0.96
+    similarity ratio it routinely flagged sentence pairs differing only in
+    the exact detail that matters in a conversation built around precise
+    physical/style constraints -- e.g. "Ran 2 commands...19/19 checks" vs
+    "Ran 3 commands...21/21 checks", "Add those two items" vs "Add that one
+    item", "barely brushing waistband" vs "brushing waistband". Character-
+    level similarity does not track semantic importance, so only chunks
+    that are byte-identical after whitespace normalization are ever
+    touched here -- there is no ratio at which two non-identical strings
+    are safe to silently merge in this tool's intended use case.
+
+    _MIN_COLLAPSE_LEN guards against collapsing short repeated verdicts
+    ("Select it.", "Reject it.") that are real per-item decisions, not
+    redundant restatement, even though they legitimately repeat verbatim
+    across many distinct items.
+
+    Only ever called on the "old" turn set in prune(); recent/verbatim
+    turns are never passed to this function, so the verbatim guarantee for
+    them is completely unaffected regardless of what repeats elsewhere.
+    """
+    seen: dict[str, int] = {}
+    result: list[Turn] = []
+
+    for turn in turns:
+        if turn.role != "assistant":
+            result.append(turn)
+            continue
+
+        parts = _REPEAT_SPLIT_RE.split(turn.content)
+        new_parts: list[str] = []
+        for idx, part in enumerate(parts):
+            if idx % 2 == 1:
+                new_parts.append(part)  # separator: keep verbatim, untouched
+                continue
+            key = re.sub(r"\s+", " ", part.strip())
+            if len(key) >= _MIN_COLLAPSE_LEN and key in seen:
+                preview = key[:50].rstrip()
+                leading  = part[:len(part) - len(part.lstrip())]
+                trailing = part[len(part.rstrip()):]
+                new_parts.append(f'{leading}[Repeated, unchanged: "{preview}..."]{trailing}')
+            else:
+                if len(key) >= _MIN_COLLAPSE_LEN:
+                    seen.setdefault(key, turn.index)
+                new_parts.append(part)
+
+        new_content = "".join(new_parts)
+        result.append(Turn(role=turn.role, content=new_content, index=turn.index))
+
+    return result
+
+
 # ---- Compression (aggressive prescription only) ------------------------------
 
 def compress(turn: Turn) -> Turn:
@@ -839,9 +898,9 @@ def compress(turn: Turn) -> Turn:
 # ---- Main prune orchestrator -------------------------------------------------
 
 _PRESCRIPTIONS: dict[str, dict[str, bool]] = {
-    "gentle":     {"boilerplate": True,  "acknowledge": False, "dedup": False, "compress": False},
-    "standard":   {"boilerplate": True,  "acknowledge": True,  "dedup": True,  "compress": False},
-    "aggressive": {"boilerplate": True,  "acknowledge": True,  "dedup": True,  "compress": True},
+    "gentle":     {"boilerplate": True,  "acknowledge": False, "dedup": False, "compress": False, "collapse_repeats": False},
+    "standard":   {"boilerplate": True,  "acknowledge": True,  "dedup": True,  "compress": False, "collapse_repeats": True},
+    "aggressive": {"boilerplate": True,  "acknowledge": True,  "dedup": True,  "compress": True,  "collapse_repeats": True},
 }
 
 
@@ -888,6 +947,8 @@ def prune(
         processed.append(c)
     if cfg["dedup"]:
         processed = deduplicate(processed)
+    if cfg["collapse_repeats"]:
+        processed = collapse_exact_repeats(processed)
     if cfg["compress"]:
         processed = [compress(t) for t in processed]
 
@@ -1047,13 +1108,11 @@ def find_data_dirs() -> list[Path]:
     home = Path.home()
     candidates: list[Path] = []
     if sys.platform == "win32":
-        appdata_default = home / "AppData" / "Roaming"
-        local_default = home / "AppData" / "Local"
-        appdata = _safe_env_base("APPDATA", appdata_default, home)
-        localappdata = _safe_env_base("LOCALAPPDATA", local_default, home)
+        appdata      = os.environ.get("APPDATA")      or str(home / "AppData" / "Roaming")
+        localappdata = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
         candidates   = [
-            appdata / "Claude",
-            localappdata / "Claude",
+            Path(appdata)      / "Claude",
+            Path(localappdata) / "Claude",
             home / ".claude",    # Claude Code also uses this; may overlap
         ]
     elif sys.platform == "darwin":
@@ -1062,10 +1121,9 @@ def find_data_dirs() -> list[Path]:
             home / ".claude",
         ]
     else:
-        xdg_default = home / ".config"
-        xdg = _safe_env_base("XDG_CONFIG_HOME", xdg_default, home)
+        xdg        = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
         candidates = [
-            xdg / "Claude",
+            Path(xdg) / "Claude",
             home / ".local" / "share" / "Claude",
             home / ".claude",
         ]
@@ -1076,16 +1134,16 @@ def find_mcp_config() -> Path | None:
     """Locate claude_desktop_config.json."""
     home = Path.home()
     if sys.platform == "win32":
-        appdata = _safe_env_base("APPDATA", home / "AppData" / "Roaming", home)
-        candidate = appdata / "Claude" / "claude_desktop_config.json"
+        appdata   = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        candidate = Path(appdata) / "Claude" / "claude_desktop_config.json"
     elif sys.platform == "darwin":
         candidate = (
             home / "Library" / "Application Support"
             / "Claude" / "claude_desktop_config.json"
         )
     else:
-        xdg = _safe_env_base("XDG_CONFIG_HOME", home / ".config", home)
-        candidate = xdg / "Claude" / "claude_desktop_config.json"
+        xdg       = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+        candidate = Path(xdg) / "Claude" / "claude_desktop_config.json"
     return candidate if candidate.exists() else None
 
 
@@ -1446,16 +1504,16 @@ def cmd_setup_mcp(_: argparse.Namespace) -> None:
         # Create the config file in the expected location
         home = Path.home()
         if sys.platform == "win32":
-            appdata = _safe_env_base("APPDATA", home / "AppData" / "Roaming", home)
-            cfg_path = appdata / "Claude" / "claude_desktop_config.json"
+            appdata  = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+            cfg_path = Path(appdata) / "Claude" / "claude_desktop_config.json"
         elif sys.platform == "darwin":
             cfg_path = (
                 home / "Library" / "Application Support"
                 / "Claude" / "claude_desktop_config.json"
             )
         else:
-            xdg = _safe_env_base("XDG_CONFIG_HOME", home / ".config", home)
-            cfg_path = xdg / "Claude" / "claude_desktop_config.json"
+            xdg      = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+            cfg_path = Path(xdg) / "Claude" / "claude_desktop_config.json"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         config: dict = {}
     else:
