@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.4] - 2026-06-18
+
+_Stable release combining [1.0.3-alpha] and [1.0.4-alpha], verified against the user's real `conversation.txt` and an independent second capture, with identical results on both._
+
+### Added
+
+- Add `collapse_exact_repeats()`: collapse byte-identical (whitespace-normalized) text chunks of 60+ chars that recur across different assistant turns, keeping the first occurrence in full. Applied to `standard` and `aggressive` only, so `gentle` stays pure noise-removal and the three prescriptions are no longer functionally identical to each other ([`a51a15f`])
+
+### Fixed
+
+- Strip Claude Desktop copy-paste UI chrome (doubled thinking-summary lines, standalone "Show more" labels) in `clean()`, so `gentle` and `standard` report real non-zero savings instead of a ~3-token no-op regardless of prescription or verbatim setting ([`a51a15f`])
+
 ## [1.0.4-alpha] - 2026-06-18
 
 _Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.4 once confirmed._
@@ -37,12 +49,14 @@ _Initial release._
 
 - Add `context_surgeon.py`: CLI (`discover`, `diagnose`, `prune`, `setup-mcp`) and stdio MCP server (`diagnose_conversation`, `prune_conversation`, `create_briefing`, `extract_rules`) for pruning Claude Desktop conversation exports ([`8add84a`])
 
+[a51a15f]: https://github.com/fishboyrocks/cozempic-2.0/commit/a51a15fa4a058d9f2ecec8852b4be58a91b722a7
 [e15030d]: https://github.com/fishboyrocks/cozempic-2.0/commit/e15030d59a239378b55d09153091985c969dda75
 [d81fe39]: https://github.com/fishboyrocks/cozempic-2.0/commit/d81fe398cb61840ec1af7fad0fcfc97d9c055940
 [a943451]: https://github.com/fishboyrocks/cozempic-2.0/commit/a943451bf1da3590d9e8765a993a01701619059e
 [aac5002]: https://github.com/fishboyrocks/cozempic-2.0/commit/aac5002f12c160b20db0159998955f8b736b58c9
 [8add84a]: https://github.com/fishboyrocks/cozempic-2.0/commit/8add84a3ff9e01a56c2178029ed97a74dff43487
 
+[1.0.4]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.4
 [1.0.4-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.4-alpha
 [1.0.3-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.3-alpha
 [1.0.2]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.2
