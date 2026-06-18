@@ -100,6 +100,20 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _safe_env_base(env_var: str, default: Path, trusted_root: Path) -> Path:
+    """Return env path only if it resolves within trusted_root; else default."""
+    raw = os.environ.get(env_var)
+    if not raw:
+        return default
+    try:
+        candidate = Path(raw).expanduser().resolve(strict=False)
+        root = trusted_root.expanduser().resolve(strict=False)
+        candidate.relative_to(root)
+        return candidate
+    except (OSError, RuntimeError, ValueError):
+        return default
+
+
 # ---- Windows UTF-8 fix -------------------------------------------------------
 # Without this, MCP JSON-RPC over stdio silently mangles non-ASCII on Windows
 # (default cp1252 encoding). Must run before any I/O.
@@ -1033,11 +1047,13 @@ def find_data_dirs() -> list[Path]:
     home = Path.home()
     candidates: list[Path] = []
     if sys.platform == "win32":
-        appdata      = os.environ.get("APPDATA")      or str(home / "AppData" / "Roaming")
-        localappdata = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        appdata_default = home / "AppData" / "Roaming"
+        local_default = home / "AppData" / "Local"
+        appdata = _safe_env_base("APPDATA", appdata_default, home)
+        localappdata = _safe_env_base("LOCALAPPDATA", local_default, home)
         candidates   = [
-            Path(appdata)      / "Claude",
-            Path(localappdata) / "Claude",
+            appdata / "Claude",
+            localappdata / "Claude",
             home / ".claude",    # Claude Code also uses this; may overlap
         ]
     elif sys.platform == "darwin":
@@ -1046,9 +1062,10 @@ def find_data_dirs() -> list[Path]:
             home / ".claude",
         ]
     else:
-        xdg        = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
+        xdg_default = home / ".config"
+        xdg = _safe_env_base("XDG_CONFIG_HOME", xdg_default, home)
         candidates = [
-            Path(xdg) / "Claude",
+            xdg / "Claude",
             home / ".local" / "share" / "Claude",
             home / ".claude",
         ]
@@ -1059,16 +1076,16 @@ def find_mcp_config() -> Path | None:
     """Locate claude_desktop_config.json."""
     home = Path.home()
     if sys.platform == "win32":
-        appdata   = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
-        candidate = Path(appdata) / "Claude" / "claude_desktop_config.json"
+        appdata = _safe_env_base("APPDATA", home / "AppData" / "Roaming", home)
+        candidate = appdata / "Claude" / "claude_desktop_config.json"
     elif sys.platform == "darwin":
         candidate = (
             home / "Library" / "Application Support"
             / "Claude" / "claude_desktop_config.json"
         )
     else:
-        xdg       = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
-        candidate = Path(xdg) / "Claude" / "claude_desktop_config.json"
+        xdg = _safe_env_base("XDG_CONFIG_HOME", home / ".config", home)
+        candidate = xdg / "Claude" / "claude_desktop_config.json"
     return candidate if candidate.exists() else None
 
 
@@ -1429,16 +1446,16 @@ def cmd_setup_mcp(_: argparse.Namespace) -> None:
         # Create the config file in the expected location
         home = Path.home()
         if sys.platform == "win32":
-            appdata  = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
-            cfg_path = Path(appdata) / "Claude" / "claude_desktop_config.json"
+            appdata = _safe_env_base("APPDATA", home / "AppData" / "Roaming", home)
+            cfg_path = appdata / "Claude" / "claude_desktop_config.json"
         elif sys.platform == "darwin":
             cfg_path = (
                 home / "Library" / "Application Support"
                 / "Claude" / "claude_desktop_config.json"
             )
         else:
-            xdg      = os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")
-            cfg_path = Path(xdg) / "Claude" / "claude_desktop_config.json"
+            xdg = _safe_env_base("XDG_CONFIG_HOME", home / ".config", home)
+            cfg_path = xdg / "Claude" / "claude_desktop_config.json"
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         config: dict = {}
     else:
