@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.4-alpha] - 2026-06-18
+
+_Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.4 once confirmed._
+
+### Added
+
+- Add `collapse_exact_repeats()`: collapse byte-identical (whitespace-normalized) text chunks of 60+ chars that recur across different assistant turns, keeping the first occurrence in full. Applied to `standard` and `aggressive` only, so `gentle` stays pure noise-removal and the three prescriptions are no longer functionally identical to each other ([`e15030d`])
+
 ## [1.0.3-alpha] - 2026-06-17
 
 _Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.3 once confirmed._
@@ -29,11 +37,13 @@ _Initial release._
 
 - Add `context_surgeon.py`: CLI (`discover`, `diagnose`, `prune`, `setup-mcp`) and stdio MCP server (`diagnose_conversation`, `prune_conversation`, `create_briefing`, `extract_rules`) for pruning Claude Desktop conversation exports ([`8add84a`])
 
+[e15030d]: https://github.com/fishboyrocks/cozempic-2.0/commit/e15030d59a239378b55d09153091985c969dda75
 [d81fe39]: https://github.com/fishboyrocks/cozempic-2.0/commit/d81fe398cb61840ec1af7fad0fcfc97d9c055940
 [a943451]: https://github.com/fishboyrocks/cozempic-2.0/commit/a943451bf1da3590d9e8765a993a01701619059e
 [aac5002]: https://github.com/fishboyrocks/cozempic-2.0/commit/aac5002f12c160b20db0159998955f8b736b58c9
 [8add84a]: https://github.com/fishboyrocks/cozempic-2.0/commit/8add84a3ff9e01a56c2178029ed97a74dff43487
 
+[1.0.4-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.4-alpha
 [1.0.3-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.3-alpha
 [1.0.2]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.2
 [1.0.1]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.1
