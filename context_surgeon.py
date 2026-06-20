@@ -112,6 +112,14 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
+# Before bumping this: classify the change FIRST, then derive the number --
+# don't anchor on "what's the next sequential digit." Removed/renamed/changed
+# the signature of any CLI command, MCP tool, or public function? -> MAJOR.
+# Added any new CLI flag, MCP tool, function, or capability? -> MINOR (this
+# is what v1.0.4 should have been -- it added collapse_exact_repeats() and
+# got versioned as a patch by mistake). Otherwise, purely corrects existing
+# behavior with no new surface -> PATCH. Debugging effort and lines changed
+# are irrelevant to this classification.
 __version__         = "1.0.5-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
