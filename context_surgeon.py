@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.5-alpha
+context_surgeon.py  v1.0.6-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.5-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.6-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.0.5-alpha"
+__version__         = "1.0.6-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -726,6 +726,15 @@ def _sentence_around(text: str, start: int, end: int) -> str:
         right = right_nl
     else:
         right = len(text)
+
+    # v1.0.6: if the sentence-ending period is immediately followed by
+    # closing punctuation -- "...anywhere else.) hence why..." -- include
+    # it too. Without this, "(luckily I don't really feel endangered
+    # anywhere else.)" was extracted as "...anywhere else." with the
+    # closing paren silently dropped, since the period (not the paren)
+    # was what the boundary search matched on.
+    while right < len(text) and text[right] in ")]\"'":
+        right += 1
 
     result  = text[left:right].strip()
     keyword = text[start:end]
