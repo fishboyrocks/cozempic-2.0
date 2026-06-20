@@ -303,11 +303,3 @@ Use the command line for:
 *Context Surgeon v1.0.0; github.com/fishboyrocks/cozempic-2.0*
 
 ---
-
-## Version History
-
-Detailed version history, including what changed and why, now lives in [`CHANGELOG.md`](CHANGELOG.md). That file is the single source of truth for all future updates; this README will not accumulate per-version prose sections going forward.
-
----
-
-*Context Surgeon; github.com/fishboyrocks/cozempic-2.0; see `CHANGELOG.md` for current version and history.*
