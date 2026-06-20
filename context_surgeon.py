@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.4
+context_surgeon.py  v1.0.5-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.4 | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.5-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -112,12 +112,31 @@ if sys.platform == "win32":
 
 # ---- Constants ---------------------------------------------------------------
 
-__version__         = "1.0.4"
+# Before bumping this: classify the change FIRST, then derive the number --
+# don't anchor on "what's the next sequential digit." Removed/renamed/changed
+# the signature of any CLI command, MCP tool, or public function? -> MAJOR.
+# Added any new CLI flag, MCP tool, function, or capability? -> MINOR (this
+# is what v1.0.4 should have been -- it added collapse_exact_repeats() and
+# got versioned as a patch by mistake). Otherwise, purely corrects existing
+# behavior with no new surface -> PATCH. Debugging effort and lines changed
+# are irrelevant to this classification.
+__version__         = "1.0.5-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
-MAX_RULE_LEN        = 350       # max chars per extracted rule sentence
+MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
+                                  # v1.0.5: raised from 350. Measured natural
+                                  # (uncapped) lengths of every real
+                                  # correction-trigger sentence in a 298K+
+                                  # char conversation: longest was 441 chars,
+                                  # next-longest 347. 350 was clipping that
+                                  # one sentence -- the safety-critical one
+                                  # naming the actual danger ("...jeopardy
+                                  # from an anti-trans hate crime") -- right
+                                  # at the word before the threat itself.
+                                  # 460 covers it with margin without being
+                                  # an arbitrary guess.
 INPUT_WARN_MB       = 5         # warn if conversation input exceeds this size
 
 THINKING_RE = re.compile(
@@ -659,18 +678,30 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     hardware ... years of rehab), so I have..." being returned as
     "years of rehab), so I have...".
 
-    Fix: determine the left boundary from the most recent sentence-end marker
-    (newline or period) before the match, with NO distance cap.  Cap the
-    TOTAL extracted string at MAX_RULE_LEN chars instead, trimming from the
-    right and re-anchoring around the keyword when it sits far from the
-    sentence start.
+    v1.0.5 fix: the v1.0.2 re-anchor step triggered whenever the keyword's
+    position exceeded HALF of MAX_RULE_LEN ('kw_pos > MAX_RULE_LEN // 2'),
+    rather than checking whether a plain right-trim would actually cut the
+    keyword off. On a 441-char sentence with the keyword at position 197
+    (which fits comfortably within a 350-char right-trim), this still
+    re-anchored and discarded 21 chars of perfectly-fittable leading context
+    ("it's okay to hurt my ") for zero benefit, producing "feelings! it's
+    CRUCIAL..." instead of "it's okay to hurt my feelings! it's CRUCIAL...".
+
+    An earlier attempt at this fix assumed Claude Desktop wraps prose
+    mid-word and inserts literal \\n characters inside words, and added
+    newline-skip detection on that basis. That assumption was checked
+    directly against a real 298K+ character export and found to be false:
+    the only genuine "letter+\\n+lowercase" occurrences anywhere in that
+    data were filename/attachment-list boundaries (e.g. "outfits i
+    own.png\\nPERSONAL STYLE..."), never mid-word prose wraps -- and treating
+    those as wraps-to-skip would have been actively wrong. No wrap-detection
+    belongs here; the real bug was purely the re-anchor trigger condition.
     """
-    # ---- left boundary: most recent sentence-end marker before match --------
+    # ---- left boundary: most recent sentence-end marker before match ------
     left_dot = text.rfind(".", 0, start)
     left_nl  = text.rfind("\n", 0, start)
 
     if left_dot != -1 and left_nl != -1:
-        # Take whichever is closer to start (the more recent sentence boundary)
         raw_left = max(left_dot + 1, left_nl + 1)
     elif left_dot != -1:
         raw_left = left_dot + 1
@@ -679,12 +710,11 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     else:
         raw_left = 0
 
-    # Consume leading whitespace that follows the boundary marker
     while raw_left < start and text[raw_left] in " \t":
         raw_left += 1
     left = raw_left
 
-    # ---- right boundary: next sentence-end marker after match ---------------
+    # ---- right boundary: next sentence-end marker after match --------------
     right_dot = text.find(".", end)
     right_nl  = text.find("\n", end)
 
@@ -697,15 +727,26 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     else:
         right = len(text)
 
-    result = text[left:right].strip()
+    result  = text[left:right].strip()
+    keyword = text[start:end]
+    kw_pos  = result.find(keyword)
+    if kw_pos == -1:
+        kw_pos = max(0, start - left)  # fallback, should not normally happen
 
-    # ---- MAX_RULE_LEN cap: trim from right; re-anchor if keyword is far in --
+    # ---- MAX_RULE_LEN cap: only re-anchor if a plain right-trim would ------
+    # ---- actually cut the keyword off; otherwise just right-trim normally -
     if len(result) > MAX_RULE_LEN:
-        kw_offset = start - left
-        if kw_offset > MAX_RULE_LEN // 2:
-            # Keyword is deep in the sentence; shift window to keep it visible
-            new_left = max(left, start - MAX_RULE_LEN // 2)
-            result   = text[new_left:right].strip()
+        kw_end = kw_pos + len(keyword)
+        if kw_end > MAX_RULE_LEN:
+            new_left = max(0, kw_pos - MAX_RULE_LEN // 2)
+            # Snap BACKWARD to the start of whatever word we're sitting in
+            # the middle of, so re-anchoring never discards a leading word
+            # entirely (a few extra included characters is harmless; losing
+            # a whole word/sentence is not).
+            if new_left > 0 and result[new_left - 1] != " ":
+                prev_space = result.rfind(" ", 0, new_left)
+                new_left = prev_space + 1 if prev_space != -1 else 0
+            result = result[new_left:].strip()
         if len(result) > MAX_RULE_LEN:
             trimmed    = result[:MAX_RULE_LEN]
             last_space = trimmed.rfind(" ")
