@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.5-alpha] - 2026-06-18
+
+_Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.5 once confirmed._
+
+### Fixed
+
+- Fix `_sentence_around`'s `MAX_RULE_LEN` re-anchor trigger: it fired whenever the keyword's position exceeded half of `MAX_RULE_LEN`, rather than checking whether a plain right-trim would actually cut the keyword off, discarding fitting leading context for no benefit. An initial diagnosis attempt blamed this on Claude Desktop wrapping prose mid-word; that was checked directly against a real 298K+ char export and found false, so no wrap-detection logic was added — the real fix is purely the re-anchor condition ([`4d4b6d2`])
+- Raise `MAX_RULE_LEN` from 350 to 460, based on measuring the natural (uncapped) length of every real correction-trigger sentence in the same export: the longest was 441 chars and happened to be the single most safety-critical rule in the conversation ([`4d4b6d2`])
+
 ## [1.0.4] - 2026-06-18
 
 _Stable release combining [1.0.3-alpha] and [1.0.4-alpha], verified against the user's real `conversation.txt` and an independent second capture, with identical results on both._
@@ -49,6 +58,7 @@ _Initial release._
 
 - Add `context_surgeon.py`: CLI (`discover`, `diagnose`, `prune`, `setup-mcp`) and stdio MCP server (`diagnose_conversation`, `prune_conversation`, `create_briefing`, `extract_rules`) for pruning Claude Desktop conversation exports ([`8add84a`])
 
+[4d4b6d2]: https://github.com/fishboyrocks/cozempic-2.0/commit/4d4b6d208ef33e8caac4fdccbf736b06c7ffbb45
 [a51a15f]: https://github.com/fishboyrocks/cozempic-2.0/commit/a51a15fa4a058d9f2ecec8852b4be58a91b722a7
 [e15030d]: https://github.com/fishboyrocks/cozempic-2.0/commit/e15030d59a239378b55d09153091985c969dda75
 [d81fe39]: https://github.com/fishboyrocks/cozempic-2.0/commit/d81fe398cb61840ec1af7fad0fcfc97d9c055940
@@ -56,6 +66,7 @@ _Initial release._
 [aac5002]: https://github.com/fishboyrocks/cozempic-2.0/commit/aac5002f12c160b20db0159998955f8b736b58c9
 [8add84a]: https://github.com/fishboyrocks/cozempic-2.0/commit/8add84a3ff9e01a56c2178029ed97a74dff43487
 
+[1.0.5-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.5-alpha
 [1.0.4]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.4
 [1.0.4-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.4-alpha
 [1.0.3-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.3-alpha
