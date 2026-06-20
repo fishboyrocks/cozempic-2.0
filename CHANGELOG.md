@@ -1,8 +1,19 @@
 # Changelog
 
+## [1.0.7-alpha] - 2026-06-19
+
+_Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.7 once confirmed. Supersedes [1.0.6-alpha], which was never tested before this quality-verification pass found further issues in it._
+
+### Fixed
+
+- Fix the right-trim step stranding closing punctuation that the v1.0.6 boundary-extension had just added: a hard cut at exactly `MAX_RULE_LEN` chars could land precisely between a period and a closing paren, silently re-dropping it ([`6e50171`])
+- Fix a spurious "…" being appended when punctuation-absorption walked all the way to the natural end of the string with nothing actually truncated ([`6e50171`])
+- Cap the original v1.0.6 boundary-extension loop at 5 chars (previously uncapped), matching the bound already on the right-trim absorption loop, so a pathological run of consecutive closing punctuation can't inflate the candidate sentence before the length check runs ([`6e50171`])
+- Add curly/smart quotes (U+2019, U+201D) to the closing-punctuation set; not exercised by the user's actual conversation but a near-zero-cost robustness improvement ([`6e50171`])
+
 ## [1.0.6-alpha] - 2026-06-19
 
-_Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.6 once confirmed._
+_Pre-release; superseded by [1.0.7-alpha] before this was ever tested. Tag left unmodified per SemVer's immutability rule._
 
 ### Fixed
 
@@ -67,6 +78,7 @@ _Initial release._
 - Add `context_surgeon.py`: CLI (`discover`, `diagnose`, `prune`, `setup-mcp`) and stdio MCP server (`diagnose_conversation`, `prune_conversation`, `create_briefing`, `extract_rules`) for pruning Claude Desktop conversation exports ([`8add84a`])
 
 [a8106c2]: https://github.com/fishboyrocks/cozempic-2.0/commit/a8106c26d24657ea4e443181dcbb0c56d0ad6dc6
+[6e50171]: https://github.com/fishboyrocks/cozempic-2.0/commit/6e501719865f8aade3cd433c8f7c0e0e7596a620
 [4d4b6d2]: https://github.com/fishboyrocks/cozempic-2.0/commit/4d4b6d208ef33e8caac4fdccbf736b06c7ffbb45
 [a51a15f]: https://github.com/fishboyrocks/cozempic-2.0/commit/a51a15fa4a058d9f2ecec8852b4be58a91b722a7
 [e15030d]: https://github.com/fishboyrocks/cozempic-2.0/commit/e15030d59a239378b55d09153091985c969dda75
@@ -75,6 +87,7 @@ _Initial release._
 [aac5002]: https://github.com/fishboyrocks/cozempic-2.0/commit/aac5002f12c160b20db0159998955f8b736b58c9
 [8add84a]: https://github.com/fishboyrocks/cozempic-2.0/commit/8add84a3ff9e01a56c2178029ed97a74dff43487
 
+[1.0.7-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.7-alpha
 [1.0.6-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.6-alpha
 [1.0.5-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.5-alpha
 [1.0.4]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.4
