@@ -606,7 +606,12 @@ def _parse_text(source: str) -> list[Turn]:
             chunk = source[content_start:content_end].strip()
             
             # Simple heuristic: if chunk starts with user-like patterns, treat as user
-            is_user_turn = any(chunk.lower().startswith(ind.lower()) for ind in _USER_INDICATORS)
+            # Improved heuristic (FMECA): check start + first 100 chars for user signals
+            first_100 = chunk[:100].lower()
+            is_user_turn = (
+                any(chunk.lower().startswith(ind.lower()) for ind in _USER_INDICATORS) or
+                any(ind in first_100 for ind in (" i ", "i'm", "i've", "i'll", "can you", "please", "?"))
+            )
             role = "user" if is_user_turn else "assistant"
             
             if chunk:
