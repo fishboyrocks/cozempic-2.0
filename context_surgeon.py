@@ -918,6 +918,11 @@ def _load_rules_store() -> dict:
                 print(f"WARNING: Rule store contains an extremely long rule ({len(rule)} chars). "
                       f"This may impact performance.", file=sys.stderr)
                 break
+        # Safeguard: enforce MAX_STORE_RULES on load (FMECA)
+        if len(data.get("rules", [])) > MAX_STORE_RULES:
+            import sys
+            print(f"WARNING: Rule store contains more rules ({len(data['rules'])}) than MAX_STORE_RULES ({MAX_STORE_RULES}). Truncating.", file=sys.stderr)
+            data["rules"] = data["rules"][:MAX_STORE_RULES]
         return data
     except Exception:
         return {"rules": [], "last_updated": None}
