@@ -126,6 +126,7 @@ CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
+MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
 REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
 _SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
@@ -910,6 +911,13 @@ def _load_rules_store() -> dict:
                         pass
                 # No valid backup — return empty to avoid corrupted data
                 return {"rules": [], "last_updated": None}
+        # Emergency length warning for individual rules (FMECA)
+        for rule in data.get("rules", []):
+            if len(rule) > MAX_RULE_STORE_LEN:
+                import sys
+                print(f"WARNING: Rule store contains an extremely long rule ({len(rule)} chars). "
+                      f"This may impact performance.", file=sys.stderr)
+                break
         return data
     except Exception:
         return {"rules": [], "last_updated": None}
