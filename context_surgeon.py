@@ -125,7 +125,7 @@ __version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detec
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
-MAX_STORE_RULES     = 500       # Safety cap to prevent unbounded rule store growth
+MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "500"))
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
                    str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
