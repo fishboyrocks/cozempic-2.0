@@ -1041,6 +1041,10 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     final_rules, info_flags = merge_rules(fresh_rules, store)
 
     # Update store
+
+    # Final deduplication safeguard (FMECA)
+    if not REVIEW_MODE:
+        final_rules = list(dict.fromkeys(final_rules))  # preserve order, remove dups
     store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
 
