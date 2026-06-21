@@ -1826,9 +1826,9 @@ def cmd_rules_status(_: argparse.Namespace) -> None:
     print(f"  Rules: {count} / {MAX_STORE_RULES} ({pct:.1f}%)")
     
     if count >= MAX_STORE_RULES:
-        print("  Status: FULL - New rules will be dropped")
+        print("  Status: FULL - New rules will be dropped. Please review and prune rules.")
     elif count >= int(MAX_STORE_RULES * 0.8):
-        print("  Status: APPROACHING CAPACITY")
+        print("  Status: APPROACHING CAPACITY - Consider reviewing rules soon.")
     else:
         print("  Status: OK")
 
