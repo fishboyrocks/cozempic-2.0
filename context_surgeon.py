@@ -127,6 +127,7 @@ DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varie
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "500"))
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
+REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
 _SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
@@ -978,6 +979,7 @@ def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict
                     "near_duplicates": overlaps[:3]
                 })
 
+    # When REVIEW_MODE=1, info_flags will contain near-duplicate candidates for manual review
     return final_rules, info_flags
 
 
