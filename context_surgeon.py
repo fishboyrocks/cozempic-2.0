@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.5-alpha
+context_surgeon.py  v1.0.7-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.5-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.7-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.0.5-alpha"
+__version__         = "1.0.7-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -137,6 +137,14 @@ MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # at the word before the threat itself.
                                   # 460 covers it with margin without being
                                   # an arbitrary guess.
+
+# v1.0.6: closing punctuation that should never be stranded one character
+# behind a sentence-ending period -- "...else.) hence..." should keep the
+# ")". Includes straight AND curly/smart quotes (checked against the real
+# conversation: zero curly-quote-after-period instances existed there, but
+# this function is meant to be reusable beyond one conversation, and the
+# cost of covering them is one constant, not new complexity).
+_CLOSING_PUNCT = ")]\"'\u2019\u201d"
 INPUT_WARN_MB       = 5         # warn if conversation input exceeds this size
 
 THINKING_RE = re.compile(
@@ -687,15 +695,18 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     ("it's okay to hurt my ") for zero benefit, producing "feelings! it's
     CRUCIAL..." instead of "it's okay to hurt my feelings! it's CRUCIAL...".
 
-    An earlier attempt at this fix assumed Claude Desktop wraps prose
-    mid-word and inserts literal \\n characters inside words, and added
-    newline-skip detection on that basis. That assumption was checked
-    directly against a real 298K+ character export and found to be false:
-    the only genuine "letter+\\n+lowercase" occurrences anywhere in that
-    data were filename/attachment-list boundaries (e.g. "outfits i
-    own.png\\nPERSONAL STYLE..."), never mid-word prose wraps -- and treating
-    those as wraps-to-skip would have been actively wrong. No wrap-detection
-    belongs here; the real bug was purely the re-anchor trigger condition.
+    v1.0.6 fix: the period-followed-by-closing-punctuation gap ("...else.)
+    hence..." losing its ")") was fixed at the boundary-finding stage, but
+    a second, more subtle version of the same bug existed at the right-trim
+    stage: a hard cut at exactly MAX_RULE_LEN chars can land precisely
+    between a period and the closing punctuation the boundary-extension
+    just added, stripping it right back off again when the extension is
+    itself what pushes the sentence 1+ chars over the cap. Found via direct
+    construction of a sentence landing at exactly MAX_RULE_LEN chars before
+    extension, not by inspection alone. Fix: the right-trim cut point now
+    absorbs the same closing punctuation the boundary extension does,
+    capped at 5 chars as a safety bound against pathological input (real
+    prose never has long runs of consecutive closing punctuation).
     """
     # ---- left boundary: most recent sentence-end marker before match ------
     left_dot = text.rfind(".", 0, start)
@@ -727,6 +738,22 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     else:
         right = len(text)
 
+    # v1.0.6: if the sentence-ending period is immediately followed by
+    # closing punctuation -- "...anywhere else.) hence why..." -- include
+    # it too. Without this, "(luckily I don't really feel endangered
+    # anywhere else.)" was extracted as "...anywhere else." with the
+    # closing paren silently dropped, since the period (not the paren)
+    # was what the boundary search matched on. Capped at 5 chars, same
+    # bound as the right-trim absorption below -- without this cap, a
+    # pathological run of consecutive closing punctuation could inflate
+    # `result` arbitrarily before the length check even runs, making the
+    # right-trim step's own cap meaningless (it only bounds what IT adds,
+    # not what this earlier loop already pulled in).
+    extended = 0
+    while right < len(text) and text[right] in _CLOSING_PUNCT and extended < 5:
+        right += 1
+        extended += 1
+
     result  = text[left:right].strip()
     keyword = text[start:end]
     kw_pos  = result.find(keyword)
@@ -750,9 +777,26 @@ def _sentence_around(text: str, start: int, end: int) -> str:
         if len(result) > MAX_RULE_LEN:
             trimmed    = result[:MAX_RULE_LEN]
             last_space = trimmed.rfind(" ")
-            if last_space > MAX_RULE_LEN - 40:
-                trimmed = trimmed[:last_space]
-            result = trimmed + "…"
+            cut_point  = last_space if last_space > MAX_RULE_LEN - 40 else MAX_RULE_LEN
+            # Absorb a SMALL run of closing punctuation immediately after
+            # the cut point (capped at 5 chars) so the hard truncation
+            # doesn't strand an orphaned ")" right after it -- this is
+            # exactly what happens when the boundary-extension above is
+            # itself what pushed the sentence just over MAX_RULE_LEN.
+            absorbed = 0
+            while (cut_point < len(result)
+                   and result[cut_point] in _CLOSING_PUNCT
+                   and absorbed < 5):
+                cut_point += 1
+                absorbed  += 1
+            if cut_point >= len(result):
+                # Absorption reached the natural end of the string --
+                # nothing was actually removed, so no "…" marker belongs
+                # here; adding one anyway would itself be a fabricated
+                # truncation signal on text that was never cut.
+                result = result[:cut_point]
+            else:
+                result = result[:cut_point] + "…"
 
     return result
 
