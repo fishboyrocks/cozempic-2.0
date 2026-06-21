@@ -94,6 +94,7 @@ import platform
 import re
 import shutil
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -120,10 +121,11 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.0.7-alpha"
+__version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
+RULES_STORE_PATH    = Path.home() / ".config" / "context-surgeon" / "rules.json"
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
 MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # v1.0.5: raised from 350. Measured natural
@@ -175,9 +177,9 @@ CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
 _COLON_RE = re.compile(
     r"^\s*"
     r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional leading [time]
-    r"(?:\*\*|__)?"                                    # optional **/__
+    r"(?:\*\*|__)? "                                    # optional **/__"
     r"(You|User|Human|Assistant|Claude(?:\s+[A-Za-z0-9][A-Za-z0-9.]*){0,3}|AI)"
-    r"(?:\*\*|__)?"                                    # optional closing **/__
+    r"(?:\*\*|__)? "                                    # optional closing **/__"
     r"\s*(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"    # optional trailing [time]
     r":\s*",                                           # required colon
     re.IGNORECASE | re.MULTILINE,
@@ -205,8 +207,8 @@ _DATE_RE = re.compile(
 # Matches the first sentence/line when it is pure acknowledgment with no content.
 _BOILERPLATE_OPEN_RE = re.compile(
     r"^\s*"
-    r"(?:Of course[!,]?\s+|Certainly[!,]?\s+|Sure[!,]?\s+|Absolutely[!,]?\s+|"
-    r"Great(?:\s+question)?[!,]?\s+)"
+    r"(?:Of course[!,]? \s+|Certainly[!,]? \s+|Sure[!,]? \s+|Absolutely[!,]? \s+|"
+    r"Great(?:\s+question)?[!,]? \s+)"
     r"[^\n]*\n\n?",
     re.IGNORECASE,
 )
@@ -281,6 +283,26 @@ CORRECTION_RE = re.compile(
     r"|make sure you\b"
     r"|you shouldn'?t"
     r"|use .{1,30} instead"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# 1.1.0: broader implicit-correction signals (adapted from cozempic's
+# classify_turn technique, written from scratch, exact-match extraction only).
+# These catch soft corrections ("actually,", "that's not right", apology-
+# follow-ups) that the original keyword list misses, while still feeding
+# the exact same hardened _sentence_around() path.
+IMPLICIT_CORRECTION_RE = re.compile(
+    r"\b(?:"
+    r"actually[,.]"
+    r"|that's not right"
+    r"|that's incorrect"
+    r"|no[, ]that's"
+    r"|wait[, ]no"
+    r"|I meant"
+    r"|I said"
+    r"|sorry[, ]but"
+    r"|actually[, ]I"
     r")\b",
     re.IGNORECASE,
 )
@@ -696,10 +718,10 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     CRUCIAL..." instead of "it's okay to hurt my feelings! it's CRUCIAL...".
 
     v1.0.6 fix: the period-followed-by-closing-punctuation gap ("...else.)
-    hence..." losing its ")") was fixed at the boundary-finding stage, but
+    hence...") losing its ")" was fixed at the boundary-finding stage, but
     a second, more subtle version of the same bug existed at the right-trim
     stage: a hard cut at exactly MAX_RULE_LEN chars can land precisely
-    between a period and the closing punctuation the boundary-extension
+    between a period and the closing punctuation the boundary extension
     just added, stripping it right back off again when the extension is
     itself what pushes the sentence 1+ chars over the cap. Found via direct
     construction of a sentence landing at exactly MAX_RULE_LEN chars before
@@ -781,7 +803,7 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             # Absorb a SMALL run of closing punctuation immediately after
             # the cut point (capped at 5 chars) so the hard truncation
             # doesn't strand an orphaned ")" right after it -- this is
-            # exactly what happens when the boundary-extension above is
+            # exactly what happens when the boundary extension above is
             # itself what pushed the sentence just over MAX_RULE_LEN.
             absorbed = 0
             while (cut_point < len(result)
@@ -816,19 +838,119 @@ def extract_rules(turns: list[Turn]) -> list[str]:
     for turn in turns:
         if turn.role != "user":
             continue
-        for m in CORRECTION_RE.finditer(turn.content):
-            sentence = _sentence_around(turn.content, m.start(), m.end())
-            if len(sentence) < 10 or len(sentence) > MAX_RULE_LEN:
-                continue
-            key = re.sub(r"\s+", " ", sentence.lower().strip())
-            if key in seen:
-                continue
-            seen.add(key)
-            rules.append(sentence)
-            if len(rules) >= MAX_RULES:
-                return rules
+        for regex in (CORRECTION_RE, IMPLICIT_CORRECTION_RE):
+            for m in regex.finditer(turn.content):
+                sentence = _sentence_around(turn.content, m.start(), m.end())
+                if len(sentence) < 10 or len(sentence) > MAX_RULE_LEN:
+                    continue
+                key = re.sub(r"\s+", " ", sentence.lower().strip())
+                if key in seen:
+                    continue
+                seen.add(key)
+                rules.append(sentence)
+                if len(rules) >= MAX_RULES:
+                    return rules
 
     return rules
+
+
+# ---- 1.1.0 Persistent Rule Store ---------------------------------------------
+
+def _bigrams(text: str) -> set[str]:
+    """Return word bigrams for informational overlap scoring only."""
+    words = re.findall(r"\b\w+\b", text.lower())
+    return {" ".join(pair) for pair in zip(words, words[1:])}
+
+
+def _load_rules_store() -> dict:
+    """Load the persistent rules store (creates empty structure if missing)."""
+    if not RULES_STORE_PATH.exists():
+        return {"rules": [], "last_updated": None}
+    try:
+        with open(RULES_STORE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "rules" not in data:
+            return {"rules": [], "last_updated": None}
+        return data
+    except Exception:
+        return {"rules": [], "last_updated": None}
+
+
+def _save_rules_store(data: dict) -> None:
+    """Atomically save the rules store."""
+    RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    _atomic_write(RULES_STORE_PATH, content)
+
+
+def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict]]:
+    """
+    Merge new rules into the store using exact-match only.
+
+    Returns (final_rules, info_flags).
+    info_flags contains entries with bigram overlap for informational use only.
+    """
+    existing = set(store.get("rules", []))
+    final_rules = list(existing)
+    info_flags: list[dict] = []
+
+    for rule in new_rules:
+        key = rule.strip()
+        if not key:
+            continue
+        if key in existing:
+            continue
+
+        # Exact match first
+        if key not in existing:
+            final_rules.append(key)
+            existing.add(key)
+
+            # Bigram overlap is calculated for informational purposes only
+            # (never used as a merge decision)
+            overlaps = []
+            for existing_rule in list(existing):
+                if existing_rule == key:
+                    continue
+                b1 = _bigrams(key)
+                b2 = _bigrams(existing_rule)
+                if b1 and b2:
+                    overlap = len(b1 & b2) / max(len(b1), len(b2))
+                    if overlap >= 0.5:
+                        overlaps.append({
+                            "rule": existing_rule[:80],
+                            "overlap": round(overlap, 2)
+                        })
+
+            if overlaps:
+                info_flags.append({
+                    "new_rule": key[:80],
+                    "near_duplicates": overlaps[:3]
+                })
+
+    return final_rules, info_flags
+
+
+def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple[list[str], list[dict]]:
+    """
+    Extract rules and optionally merge with the persistent store.
+
+    When use_store=False, behaves exactly like the original extract_rules().
+    """
+    fresh_rules = extract_rules(turns)  # original function
+
+    if not use_store:
+        return fresh_rules, []
+
+    store = _load_rules_store()
+    final_rules, info_flags = merge_rules(fresh_rules, store)
+
+    # Update store
+    store["rules"] = final_rules
+    store["last_updated"] = datetime.now().isoformat()
+    _save_rules_store(store)
+
+    return final_rules, info_flags
 
 
 # ---- Deduplication -----------------------------------------------------------
@@ -1004,7 +1126,7 @@ def prune(
     cfg = _PRESCRIPTIONS[prescription]
 
     orig_tokens = sum(t.tokens() for t in turns)
-    rules       = extract_rules(turns)
+    rules, _    = extract_rules_with_store(turns, use_store=True)
 
     # Clamp verbatim to [0, len(turns)]
     verbatim = max(0, min(verbatim, len(turns)))
@@ -1075,7 +1197,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
       3. Compressed conversation history
       4. Most recent N turns verbatim
     """
-    rules    = extract_rules(turns)
+    rules, _ = extract_rules_with_store(turns, use_store=True)
     pruned, stats = prune(turns, verbatim, "aggressive")
     ts       = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1456,6 +1578,47 @@ def run_mcp() -> None:
         sys.stdout.flush()
 
 
+# ---- Atomic write helper (1.1.0) --------------------------------------------
+
+def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """
+    Write content to *path* atomically.
+
+    Uses a unique temporary file in the same directory, fsync before
+    rename, and os.replace for the final atomic swap. This guarantees
+    that on crash the target either contains the old complete file or
+    the new complete file — never a truncated partial write.
+
+    This is the recommended pattern for any file that a user may
+    repeatedly overwrite (briefings, config files).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Use a unique suffix so concurrent runs cannot collide
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=path.name + ".",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_path)
+
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_path, path)
+    except Exception:
+        # Clean up the temp file on any failure
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 # ---- CLI commands ------------------------------------------------------------
 
 def _read_input(path: str) -> str:
@@ -1568,7 +1731,7 @@ def cmd_prune(args: argparse.Namespace) -> None:
 
     output_path = getattr(args, "output", None)
     if output_path:
-        Path(output_path).write_text(briefing, encoding="utf-8")
+        _atomic_write(Path(output_path), briefing)
         print(f"\nBriefing saved -> {output_path}", file=sys.stderr)
         print(
             "Paste its contents as the first message in a new "
@@ -1623,21 +1786,19 @@ def cmd_setup_mcp(_: argparse.Namespace) -> None:
         shutil.copy2(cfg_path, backup)
         print(f"Config backed up -> {backup}")
 
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    _atomic_write(cfg_path, json.dumps(config, indent=2, ensure_ascii=False) + "\n")
 
     print(f"\ncontext-surgeon registered in:\n  {cfg_path}")
-    print("\nNext step: restart Claude Desktop.")
-    print("\nAvailable MCP tools after restart:")
+    print("Next step: restart Claude Desktop.")
+    print("Available MCP tools after restart:")
     for t in _TOOLS:
         print(f"  {t['name']}")
-    print("\nWorkflow:")
+    print("Workflow:")
     print("  1. Conversation approaching its context limit?")
     print("     Call create_briefing with your conversation text pasted in.")
     print("  2. Start a new conversation; paste the briefing as the first message.")
     print("  3. Continue -- full context headroom, no nuance lost.")
-    print("\nOr use the CLI directly (no MCP needed):")
+    print("Or use the CLI directly (no MCP needed):")
     print(f"  python {script} prune conversation.txt --output briefing.md")
 
 
