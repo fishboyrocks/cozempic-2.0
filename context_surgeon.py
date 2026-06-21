@@ -867,7 +867,7 @@ def _bigrams(text: str) -> set[str]:
 
 
 def _load_rules_store() -> dict:
-    """Load the persistent rules store (creates empty structure if missing)."""
+    """Load the persistent rules store with SHA-256 checksum verification (FMECA F02)."""
     if not RULES_STORE_PATH.exists():
         return {"rules": [], "last_updated": None}
     try:
@@ -875,25 +875,54 @@ def _load_rules_store() -> dict:
             data = json.load(f)
         if not isinstance(data, dict) or "rules" not in data:
             return {"rules": [], "last_updated": None}
+
+        # Verify checksum if present
+        if "checksum" in data:
+            stored_checksum = data["checksum"]
+            rules_str = json.dumps(data.get("rules", []), sort_keys=True)
+            computed_checksum = hashlib.sha256(rules_str.encode("utf-8")).hexdigest()
+            if stored_checksum != computed_checksum:
+                # Checksum failed — try backup
+                backup = RULES_STORE_PATH.with_suffix(".json.bak")
+                if backup.exists():
+                    try:
+                        with open(backup, encoding="utf-8") as bf:
+                            backup_data = json.load(bf)
+                        if isinstance(backup_data, dict) and "rules" in backup_data:
+                            return backup_data
+                    except Exception:
+                        pass
+                # No valid backup — return empty to avoid corrupted data
+                return {"rules": [], "last_updated": None}
         return data
     except Exception:
         return {"rules": [], "last_updated": None}
 
 
 def _save_rules_store(data: dict) -> None:
-    """Atomically save the rules store with post-write integrity verification."""
+    """Atomically save the rules store with SHA-256 checksum for strong integrity (FMECA F02/F06)."""
     RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Compute checksum of the rules list
+    rules_str = json.dumps(data.get("rules", []), sort_keys=True)
+    checksum = hashlib.sha256(rules_str.encode("utf-8")).hexdigest()
+    data["checksum"] = checksum
+
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     _atomic_write(RULES_STORE_PATH, content)
 
-    # Post-write integrity check (FMECA mitigation F06)
+    # Post-write integrity verification
     try:
         with open(RULES_STORE_PATH, encoding="utf-8") as f:
             loaded = json.load(f)
-        if not isinstance(loaded, dict) or "rules" not in loaded:
-            raise ValueError("Store integrity check failed: invalid structure")
+        if not isinstance(loaded, dict) or "rules" not in loaded or "checksum" not in loaded:
+            raise ValueError("Store missing required fields")
+        # Verify checksum
+        loaded_rules_str = json.dumps(loaded.get("rules", []), sort_keys=True)
+        loaded_checksum = hashlib.sha256(loaded_rules_str.encode("utf-8")).hexdigest()
+        if loaded_checksum != loaded["checksum"]:
+            raise ValueError("Checksum mismatch after write")
     except Exception as e:
-        # If integrity check fails, attempt to restore from backup
         backup = RULES_STORE_PATH.with_suffix(".json.bak")
         if backup.exists():
             try:
@@ -901,7 +930,7 @@ def _save_rules_store(data: dict) -> None:
                 _atomic_write(RULES_STORE_PATH, backup_content)
             except Exception:
                 pass
-        raise RuntimeError(f"Rule store write failed integrity check: {e}") from e
+        raise RuntimeError(f"Rule store integrity verification failed: {e}") from e
 def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict]]:
     """
     Merge new rules into the store using exact-match only.
