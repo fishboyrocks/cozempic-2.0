@@ -800,14 +800,14 @@ def _sentence_around(text: str, start: int, end: int) -> str:
 
     # ---- MAX_RULE_LEN cap: only re-anchor if a plain right-trim would ------
     # ---- actually cut the keyword off; otherwise just right-trim normally -
-    if len(result) > MAX_RULE_LEN:
+    # Safety-critical sentences are never truncated (FMECA F09)
+    if _is_safety_critical(result):
+        # Safety sentences bypass length limit entirely
+        pass
+    elif len(result) > MAX_RULE_LEN:
         kw_end = kw_pos + len(keyword)
         if kw_end > MAX_RULE_LEN:
             new_left = max(0, kw_pos - MAX_RULE_LEN // 2)
-            # Snap BACKWARD to the start of whatever word we're sitting in
-            # the middle of, so re-anchoring never discards a leading word
-            # entirely (a few extra included characters is harmless; losing
-            # a whole word/sentence is not).
             if new_left > 0 and result[new_left - 1] != " ":
                 prev_space = result.rfind(" ", 0, new_left)
                 new_left = prev_space + 1 if prev_space != -1 else 0
@@ -816,11 +816,6 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             trimmed    = result[:MAX_RULE_LEN]
             last_space = trimmed.rfind(" ")
             cut_point  = last_space if last_space > MAX_RULE_LEN - 40 else MAX_RULE_LEN
-            # Absorb a SMALL run of closing punctuation immediately after
-            # the cut point (capped at 5 chars) so the hard truncation
-            # doesn't strand an orphaned ")" right after it -- this is
-            # exactly what happens when the boundary extension above is
-            # itself what pushed the sentence just over MAX_RULE_LEN.
             absorbed = 0
             while (cut_point < len(result)
                    and result[cut_point] in _CLOSING_PUNCT
@@ -828,15 +823,9 @@ def _sentence_around(text: str, start: int, end: int) -> str:
                 cut_point += 1
                 absorbed  += 1
             if cut_point >= len(result):
-                # Absorption reached the natural end of the string --
-                # nothing was actually removed, so no "…" marker belongs
-                # here; adding one anyway would itself be a fabricated
-                # truncation signal on text that was never cut.
                 result = result[:cut_point]
             else:
                 result = result[:cut_point] + "…"
-
-    return result
 
 
 def extract_rules(turns: list[Turn]) -> list[str]:
