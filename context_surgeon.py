@@ -134,7 +134,7 @@ RULES_STORE_PATH    = Path(
                    str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
 )
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
-MAX_RULE_LEN        = 450       # Data-driven: 441 (max observed) + 9 char margin
+MAX_RULE_LEN        = 800       # Conservative: 441 observed max + 359 char margin
                                   # v1.0.5: raised from 350. Measured natural
                                   # (uncapped) lengths of every real
                                   # correction-trigger sentence in a 298K+
