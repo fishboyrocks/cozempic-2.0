@@ -1015,6 +1015,12 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     # Update store
     store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
+
+    # Warning when approaching store cap (FMECA)
+    if len(final_rules) >= int(MAX_STORE_RULES * 0.8):
+        import sys
+        print(f"WARNING: Rule store is approaching capacity ({len(final_rules)}/{MAX_STORE_RULES} rules). "
+              f"Consider reviewing or pruning rules.", file=sys.stderr)
     _save_rules_store(store)
 
     return final_rules, info_flags
