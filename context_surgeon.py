@@ -126,6 +126,7 @@ CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "500"))
+MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
                    str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
@@ -1499,6 +1500,9 @@ _TOOLS = [
 def _call_tool(name: str, args: dict) -> str:
     """Dispatch an MCP tool call and return the result as text."""
     text  = args.get("conversation_text", "")
+    if len(text) > MCP_MAX_INPUT_CHARS:
+        return f"ERROR: Input too large ({len(text):,} chars). Maximum allowed: {MCP_MAX_INPUT_CHARS:,} chars. Use the CLI for large conversations."
+
     turns = parse_conversation(text)
 
     if name == "diagnose_conversation":
