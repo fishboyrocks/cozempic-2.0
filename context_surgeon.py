@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.1.0-alpha
+context_surgeon.py  v1.2.0-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -121,11 +121,11 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
+__version__         = "1.2.0-alpha"  # MINOR: configurable store + size cap + surfaced bigram flags
 
 # Static dual-constant version guard (replaces fragile file-reading approach)
 # Both of these MUST be updated together when bumping versions.
-_DOCSTRING_VERSION = "1.1.0-alpha"
+_DOCSTRING_VERSION = "1.2.0-alpha"
 
 if _DOCSTRING_VERSION != __version__:
     import warnings
@@ -136,7 +136,11 @@ if _DOCSTRING_VERSION != __version__:
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
-RULES_STORE_PATH    = Path.home() / ".config" / "context-surgeon" / "rules.json"
+RULES_STORE_PATH    = Path(
+    os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
+                   str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
+)
+MAX_STORE_RULES     = 500       # 1.1.1: hard cap to prevent unbounded growth
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
 MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # v1.0.5: raised from 350. Measured natural
@@ -956,8 +960,8 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     store = _load_rules_store()
     final_rules, info_flags = merge_rules(fresh_rules, store)
 
-    # Update store
-    store["rules"] = final_rules
+    # Update store (with hard cap)
+    store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
     _save_rules_store(store)
 
