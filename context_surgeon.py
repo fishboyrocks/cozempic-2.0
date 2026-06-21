@@ -126,7 +126,10 @@ CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
 MAX_STORE_RULES     = 500       # Safety cap to prevent unbounded rule store growth
-RULES_STORE_PATH    = Path.home() / ".config" / "context-surgeon" / "rules.json"
+RULES_STORE_PATH    = Path(
+    os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
+                   str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
+)
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
 MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # v1.0.5: raised from 350. Measured natural
@@ -947,7 +950,7 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     final_rules, info_flags = merge_rules(fresh_rules, store)
 
     # Update store
-    store["rules"] = final_rules
+    store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
     _save_rules_store(store)
 
