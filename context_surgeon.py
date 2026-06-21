@@ -127,6 +127,7 @@ DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varie
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "500"))
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
+_SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
                    str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
@@ -987,6 +988,23 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     When use_store=False, behaves exactly like the original extract_rules().
     """
     fresh_rules = extract_rules(turns)  # original function
+
+    # Safety net for critical rules (FMECA F01) - does not modify _sentence_around()
+    safety_keywords = ("anti-trans hate crime", "physical safety", "jeopardy from an")
+    for turn in turns:
+        if turn.role != "user":
+            continue
+        for kw in safety_keywords:
+            if kw.lower() in turn.content.lower():
+                # Check if this safety content made it into fresh_rules
+                found = any(kw.lower() in r.lower() for r in fresh_rules)
+                if not found:
+                    # Force include a minimal version of the safety rule
+                    for sent in turn.content.split("."):
+                        if kw.lower() in sent.lower() and len(sent) > 30:
+                            fresh_rules.append(sent.strip() + ".")
+                            break
+                break
 
     if not use_store:
         return fresh_rules, []
