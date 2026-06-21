@@ -892,8 +892,17 @@ def _load_rules_store() -> dict:
 
 
 def _save_rules_store(data: dict) -> None:
-    """Atomically save the rules store."""
+    """Atomically save the rules store with automatic backup."""
     RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create backup of existing store before writing new one
+    if RULES_STORE_PATH.exists():
+        try:
+            backup_path = RULES_STORE_PATH.with_suffix(".json.bak")
+            backup_path.write_text(RULES_STORE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass  # Backup failure should not block the main write
+
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     _atomic_write(RULES_STORE_PATH, content)
 
@@ -1510,12 +1519,17 @@ def _call_tool(name: str, args: dict) -> str:
     if name == "extract_rules":
         if not turns:
             return "No turns found."
-        rules = extract_rules(turns)
+        rules, info_flags = extract_rules_with_store(turns, use_store=True)
         if not rules:
             return "No behavioral correction rules detected in this conversation."
         sep = "-" * 40
         out = ["BEHAVIORAL CORRECTIONS:", sep]
         out.extend(f"{i}. {r}" for i, r in enumerate(rules, 1))
+        if info_flags:
+            out.append("")
+            out.append("Near-duplicate candidates (informational):")
+            for flag in info_flags[:3]:
+                out.append(f"  - {flag['new_rule']}")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
