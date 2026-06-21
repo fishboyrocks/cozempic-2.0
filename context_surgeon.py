@@ -1499,12 +1499,17 @@ def _call_tool(name: str, args: dict) -> str:
     if name == "extract_rules":
         if not turns:
             return "No turns found."
-        rules = extract_rules(turns)
+        rules, info_flags = extract_rules_with_store(turns, use_store=True)
         if not rules:
             return "No behavioral correction rules detected in this conversation."
         sep = "-" * 40
         out = ["BEHAVIORAL CORRECTIONS:", sep]
         out.extend(f"{i}. {r}" for i, r in enumerate(rules, 1))
+        if info_flags:
+            out.append("")
+            out.append("Near-duplicate candidates (informational only):")
+            for flag in info_flags[:3]:
+                out.append(f"  - {flag['new_rule']}")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
