@@ -1781,6 +1781,26 @@ def cmd_discover(_: argparse.Namespace) -> None:
     print(f"Platform: {sys.platform} / {platform.machine()}")
 
 
+
+def cmd_rules_status(_: argparse.Namespace) -> None:
+    """Show current rule store status and capacity."""
+    from context_surgeon import _load_rules_store, MAX_STORE_RULES
+    
+    store = _load_rules_store()
+    rules = store.get("rules", [])
+    count = len(rules)
+    pct = (count / MAX_STORE_RULES * 100) if MAX_STORE_RULES > 0 else 0
+    
+    print(f"Rule Store Status")
+    print(f"  Rules: {count} / {MAX_STORE_RULES} ({pct:.1f}%)")
+    
+    if count >= MAX_STORE_RULES:
+        print("  Status: FULL - New rules will be dropped")
+    elif count >= int(MAX_STORE_RULES * 0.8):
+        print("  Status: APPROACHING CAPACITY")
+    else:
+        print("  Status: OK")
+
 def cmd_diagnose(args: argparse.Namespace) -> None:
     source = _read_input(args.file)
     turns  = parse_conversation(source)
@@ -1924,6 +1944,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("discover",   help="Find Claude Desktop data directories + MCP config")
+    sub.add_parser("rules-status", help="Show current rule store status and capacity")
 
     pd = sub.add_parser("diagnose", help="Analyze a conversation for bloat and savings potential")
     pd.add_argument("file", help="Conversation file or - for stdin")
@@ -1963,6 +1984,7 @@ def main() -> None:
         "diagnose":  cmd_diagnose,
         "prune":     cmd_prune,
         "setup-mcp": cmd_setup_mcp,
+        "rules-status": cmd_rules_status,
     }
 
     if args.command in commands:
