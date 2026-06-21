@@ -867,6 +867,16 @@ def _bigrams(text: str) -> set[str]:
     return {" ".join(pair) for pair in zip(words, words[1:])}
 
 
+
+import datetime as _dt
+
+def _log_store_change(action: str, count: int, max_count: int):
+    """Simple audit logging for rule store changes (FMECA)."""
+    ts = _dt.datetime.now().isoformat()
+    msg = f"[{ts}] STORE {action}: {count}/{max_count} rules"
+    import sys
+    print(msg, file=sys.stderr)
+
 def _load_rules_store() -> dict:
     """Load the persistent rules store with SHA-256 checksum verification (FMECA F02)."""
     if not RULES_STORE_PATH.exists():
@@ -1015,6 +1025,9 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     # Update store
     store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
+
+    # Audit log for store changes (FMECA)
+    _log_store_change("UPDATE", len(final_rules), MAX_STORE_RULES)
 
 
     # Hard cap reached message (FMECA)
