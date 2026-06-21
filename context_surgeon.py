@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.7-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.1.0-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -122,6 +122,19 @@ if sys.platform == "win32":
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
 __version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
+# --- Unit-test style version consistency check (added after 1.1.0-alpha verification failure) ---
+# This runs at import time. If it ever fails, it means someone updated one
+# version location but not the other. This is the exact class of error that
+# slipped through the original "rigorous" verification process.
+_docstring_version = None
+with open(__file__, encoding="utf-8") as _f:
+    for _line in _f:
+        if _line.strip().startswith("context_surgeon.py") and "v" in _line:
+            _docstring_version = _line.split("v")[-1].strip().split()[0]
+            break
+if _docstring_version and _docstring_version != __version__:
+    import warnings
+    warnings.warn(f"VERSION MISMATCH: docstring says v{_docstring_version} but __version__ is {__version__}", stacklevel=2)
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
