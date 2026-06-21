@@ -208,6 +208,9 @@ _DATE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# User-turn indicators for Format 3 improvement (FMECA F05)
+_USER_INDICATORS = ("?", "I need", "Can you", "Please", "I want")
+
 # ---- v1.0.2 gentle / standard prescription patterns -------------------------
 
 # Boilerplate opening phrases stripped from assistant turns in all prescriptions.
@@ -595,13 +598,19 @@ def _parse_text(source: str) -> list[Turn]:
         if pre:
             turns.append(Turn(role="user", content=pre, index=idx))
             idx += 1
-        # Each post-date block is labeled assistant (dates precede Claude responses).
-        for i, m in enumerate(date_matches):
-            content_start = m.end()
+        # Improved user-turn detection for Format 3 (FMECA F05)
+        # Check if content immediately before a date looks like a user turn
+        for i in range(len(date_matches)):
+            content_start = date_matches[i].end()
             content_end   = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(source)
             chunk = source[content_start:content_end].strip()
+            
+            # Simple heuristic: if chunk starts with user-like patterns, treat as user
+            is_user_turn = any(chunk.lower().startswith(ind.lower()) for ind in _USER_INDICATORS)
+            role = "user" if is_user_turn else "assistant"
+            
             if chunk:
-                turns.append(Turn(role="assistant", content=chunk, index=idx))
+                turns.append(Turn(role=role, content=chunk, index=idx))
                 idx += 1
         if len(turns) >= 2:
             return turns
