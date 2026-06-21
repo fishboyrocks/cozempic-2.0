@@ -881,12 +881,27 @@ def _load_rules_store() -> dict:
 
 
 def _save_rules_store(data: dict) -> None:
-    """Atomically save the rules store."""
+    """Atomically save the rules store with post-write integrity verification."""
     RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     _atomic_write(RULES_STORE_PATH, content)
 
-
+    # Post-write integrity check (FMECA mitigation F06)
+    try:
+        with open(RULES_STORE_PATH, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict) or "rules" not in loaded:
+            raise ValueError("Store integrity check failed: invalid structure")
+    except Exception as e:
+        # If integrity check fails, attempt to restore from backup
+        backup = RULES_STORE_PATH.with_suffix(".json.bak")
+        if backup.exists():
+            try:
+                backup_content = backup.read_text(encoding="utf-8")
+                _atomic_write(RULES_STORE_PATH, backup_content)
+            except Exception:
+                pass
+        raise RuntimeError(f"Rule store write failed integrity check: {e}") from e
 def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict]]:
     """
     Merge new rules into the store using exact-match only.
