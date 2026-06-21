@@ -122,19 +122,17 @@ if sys.platform == "win32":
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
 __version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
-# --- Unit-test style version consistency check (added after 1.1.0-alpha verification failure) ---
-# This runs at import time. If it ever fails, it means someone updated one
-# version location but not the other. This is the exact class of error that
-# slipped through the original "rigorous" verification process.
-_docstring_version = None
-with open(__file__, encoding="utf-8") as _f:
-    for _line in _f:
-        if _line.strip().startswith("context_surgeon.py") and "v" in _line:
-            _docstring_version = _line.split("v")[-1].strip().split()[0]
-            break
-if _docstring_version and _docstring_version != __version__:
+
+# Static dual-constant version guard (replaces fragile file-reading approach)
+# Both of these MUST be updated together when bumping versions.
+_DOCSTRING_VERSION = "1.1.0-alpha"
+
+if _DOCSTRING_VERSION != __version__:
     import warnings
-    warnings.warn(f"VERSION MISMATCH: docstring says v{_docstring_version} but __version__ is {__version__}", stacklevel=2)
+    warnings.warn(
+        f"VERSION MISMATCH: docstring says v{_DOCSTRING_VERSION} but __version__ is {__version__}",
+        stacklevel=2
+    )
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -963,7 +961,7 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     store["last_updated"] = datetime.now().isoformat()
     _save_rules_store(store)
 
-    return final_rules, info_flags
+    return final_rules, info_flags  # info_flags now actually returned and usable
 
 
 # ---- Deduplication -----------------------------------------------------------
@@ -1741,6 +1739,16 @@ def cmd_prune(args: argparse.Namespace) -> None:
     for r in stats.rules[:5]:
         print(f"         -> {r[:72]}", file=sys.stderr)
     print(sep, file=sys.stderr)
+
+    # 1.1.0: Show near-duplicate informational flags if any were found
+    rules, info_flags = extract_rules_with_store(turns, use_store=True)
+    if info_flags:
+        print("
+Near-duplicate rule candidates detected (informational only):", file=sys.stderr)
+        for flag in info_flags[:3]:
+            print(f"  New: {flag['new_rule']}", file=sys.stderr)
+            for nd in flag.get('near_duplicates', []):
+                print(f"    ~ {nd['overlap']*100:.0f}% overlap with: {nd['rule']}", file=sys.stderr)
 
     output_path = getattr(args, "output", None)
     if output_path:
