@@ -364,7 +364,7 @@ def parse_conversation(source: str) -> list[Turn]:
             pass  # fall through to JSONL / text
 
     # JSONL (one JSON object per line — Claude Code session format)
-    first_nonblank = next((l.strip() for l in source.splitlines() if l.strip()), "")
+    first_nonblank = next((L.strip() for L in source.splitlines() if L.strip()), "")
     if first_nonblank.startswith("{"):
         try:
             return _parse_jsonl(source)
