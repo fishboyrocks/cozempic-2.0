@@ -1062,6 +1062,12 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
         import sys
         print(f"WARNING: Rule store is approaching capacity ({len(final_rules)}/{MAX_STORE_RULES} rules). "
               f"Consider reviewing or pruning rules.", file=sys.stderr)
+
+    # Duplicate safeguard (FMECA)
+    if len(set(store.get("rules", []))) != len(store.get("rules", [])):
+        import sys
+        print("ERROR: Duplicate rules detected in store before save. Aborting save.", file=sys.stderr)
+        return final_rules, info_flags
     _save_rules_store(store)
 
     return final_rules, info_flags
@@ -1346,7 +1352,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "---",
         "",
         "## CONVERSATION HISTORY",
-        f"*Older turns: aggressive compression (code blocks always verbatim).*",
+        "*Older turns: aggressive compression (code blocks always verbatim).*",
         f"*Last {verbatim} turns: verbatim.*",
         "",
     ]
@@ -1826,7 +1832,7 @@ def cmd_rules_status(_: argparse.Namespace) -> None:
     count = len(rules)
     pct = (count / MAX_STORE_RULES * 100) if MAX_STORE_RULES > 0 else 0
     
-    print(f"Rule Store Status")
+    print("Rule Store Status")
     print(f"  Rules: {count} / {MAX_STORE_RULES} ({pct:.1f}%)")
     
     if count >= MAX_STORE_RULES:
