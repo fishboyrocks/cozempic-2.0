@@ -99,7 +99,7 @@ import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-
+# ruff: noqa: E741
 
 # ---- Windows UTF-8 fix -------------------------------------------------------
 # Without this, MCP JSON-RPC over stdio silently mangles non-ASCII on Windows
