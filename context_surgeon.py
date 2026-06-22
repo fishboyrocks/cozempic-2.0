@@ -1110,7 +1110,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "---",
         "",
         "## CONVERSATION HISTORY",
-        f"*Older turns: aggressive compression (code blocks always verbatim).*",
+        "*Older turns: aggressive compression (code blocks always verbatim).*",
         f"*Last {verbatim} turns: verbatim.*",
         "",
     ]
