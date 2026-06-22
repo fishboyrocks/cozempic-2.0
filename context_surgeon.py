@@ -1867,6 +1867,11 @@ def cmd_prune(args: argparse.Namespace) -> None:
     print(f"Tokens:  ~{stats.orig_tokens:,} -> ~{stats.final_tokens:,}", file=sys.stderr)
     print(f"Saved:   ~{stats.saved_tokens:,} tokens  ({stats.saved_pct}%)", file=sys.stderr)
     print(f"Rules:   {stats.rules_found} behavioral corrections preserved", file=sys.stderr)
+
+    # Low rule count warning (FMECA)
+    if stats.rules_found < 3 and stats.orig_turns > 10:
+        print("WARNING: Very few behavioral rules were extracted. "
+              "This may indicate a parsing issue with the conversation format.", file=sys.stderr)
     for r in stats.rules[:5]:
         print(f"         -> {r[:72]}", file=sys.stderr)
     print(sep, file=sys.stderr)
