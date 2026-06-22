@@ -1,8 +1,10 @@
 name: Ruff
 on: [ push, pull_request ]
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 jobs:
   ruff:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v4.0.0
