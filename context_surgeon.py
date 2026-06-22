@@ -392,7 +392,7 @@ def parse_conversation(source: str) -> list[Turn]:
             pass  # fall through to JSONL / text
 
     # JSONL (one JSON object per line — Claude Code session format)
-    first_nonblank = next((l.strip() for l in source.splitlines() if l.strip()), "")
+    first_nonblank = next((L.strip() for L in source.splitlines() if L.strip()), "")
     if first_nonblank.startswith("{"):
         try:
             return _parse_jsonl(source)
@@ -1288,7 +1288,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "---",
         "",
         "## CONVERSATION HISTORY",
-        f"*Older turns: aggressive compression (code blocks always verbatim).*",
+        "*Older turns: aggressive compression (code blocks always verbatim).*",
         f"*Last {verbatim} turns: verbatim.*",
         "",
     ]
