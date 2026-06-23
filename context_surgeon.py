@@ -1073,6 +1073,10 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
         import sys
         print("ERROR: Duplicate rules detected in store before save. Aborting save.", file=sys.stderr)
         return final_rules, info_flags
+
+    # Skip save if no rules (FMECA)
+    if not final_rules:
+        return final_rules, info_flags
     _save_rules_store(store)
 
     return final_rules, info_flags
