@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.7-alpha
+context_surgeon.py  v1.2.0
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.7-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.2.0 | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
+__version__         = "1.2.0"  # 1.2.0 stable release: atomic writes + broader detection
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
@@ -331,6 +331,14 @@ class Turn:
     content: str
     index:   int = 0
 
+
+# Safety-critical keywords that should trigger extra caution in rule extraction
+_SAFETY_KEYWORDS = ("hate crime", "physical safety", "jeopardy", "endangered", "anti-trans")
+
+def _is_safety_critical(text: str) -> bool:
+    """Check if a sentence contains safety-critical content."""
+    lower = text.lower()
+    return any(kw in lower for kw in _SAFETY_KEYWORDS)
     def tokens(self) -> int:
         """Estimated token count using the calibrated chars-per-token ratio."""
         return max(1, int(len(self.content) / CHARS_PER_TOKEN))
