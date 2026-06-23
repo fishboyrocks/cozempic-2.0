@@ -127,11 +127,13 @@ CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
+MAX_STORE_RULES_HARD_MAX = 50   # Absolute hard ceiling (FMECA defense-in-depth)
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
+AUDIT_LOG_PATH      = Path.home() / ".config" / "context-surgeon" / "audit.log"
 MAX_RULE_STORE_LEN_SAVE = 1200  # Max rule length allowed to be saved (FMECA)
 MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
-REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
+REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "1") == "1"
 _SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
@@ -887,12 +889,21 @@ def _bigrams(text: str) -> set[str]:
 
 
 def _log_store_change(action: str, count: int, max_count: int):
-    """Simple audit logging for rule store changes (FMECA)."""
+    """Write audit log to both stderr and persistent file (FMECA F12)."""
     ts = _dt.datetime.now().isoformat()
     msg = f"[{ts}] STORE {action}: {count}/{max_count} rules"
+    
+    # Always print to stderr
     import sys
     print(msg, file=sys.stderr)
-
+    
+    # Also append to audit log file
+    try:
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as logf:
+            logf.write(msg + "\n")
+    except Exception:
+        pass  # Audit logging failure should not break core functionality
 def _load_rules_store() -> dict:
     """Load the persistent rules store with SHA-256 checksum verification (FMECA F02)."""
     if not RULES_STORE_PATH.exists():
@@ -1058,7 +1069,8 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
 
     # Update store
 
-    # Final deduplication safeguard (FMECA)
+    # Always deduplicate exact matches before saving (FMECA)
+    final_rules = list(dict.fromkeys(final_rules))  # preserve order, remove dups
     if not REVIEW_MODE:
         final_rules = list(dict.fromkeys(final_rules))  # preserve order, remove dups
     store["rules"] = final_rules[:MAX_STORE_RULES]
@@ -1104,6 +1116,20 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     # Skip save if no changes (FMECA)
     old_rules = store.get("rules", [])
     if final_rules == old_rules:
+        return final_rules, info_flags
+
+    # Sudden increase safeguard (FMECA)
+    old_count = len(store.get("rules", []))
+    new_count = len(final_rules)
+    if new_count - old_count > 20:
+        import sys
+        print(f"WARNING: Large rule increase detected ({old_count} → {new_count}). Save aborted for safety.", file=sys.stderr)
+        return final_rules, info_flags
+
+    # Hard maximum safeguard (FMECA)
+    if len(final_rules) > MAX_STORE_RULES_HARD_MAX:
+        import sys
+        print(f"CRITICAL ERROR: Rule count ({len(final_rules)}) exceeds hard maximum ({MAX_STORE_RULES_HARD_MAX}). Save aborted.", file=sys.stderr)
         return final_rules, info_flags
     _save_rules_store(store)
 
@@ -1355,6 +1381,16 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
       4. Most recent N turns verbatim
     """
     rules, _ = extract_rules_with_store(turns, use_store=True)
+
+    # Capacity warning for create_briefing (FMECA F11)
+    from context_surgeon import MAX_STORE_RULES
+    capacity_warning = ""
+    if len(rules) >= int(MAX_STORE_RULES * 0.8):
+        if len(rules) >= MAX_STORE_RULES:
+            capacity_warning = f"\n\n**WARNING:** Rule store is FULL ({len(rules)}/{MAX_STORE_RULES}). New rules will be dropped.\n"
+        else:
+            capacity_warning = f"\n\n**WARNING:** Rule store is approaching capacity ({len(rules)}/{MAX_STORE_RULES}). Consider reviewing rules.\n"
+
     pruned, stats = prune(turns, verbatim, "aggressive")
     ts       = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1365,6 +1401,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         f"*Original: {stats.orig_turns} turns, ~{stats.orig_tokens:,} tokens*",
         f"*Compressed: {stats.final_turns} turns, ~{stats.final_tokens:,} tokens*",
         f"*Saved: {stats.saved_pct}% | Last {verbatim} turns verbatim*",
+        capacity_warning,
         "",
         "> **How to use**: Paste this entire document as your first message in a new",
         "> Claude Desktop conversation. It carries forward your behavioral corrections,",
@@ -1638,12 +1675,23 @@ def _call_tool(name: str, args: dict) -> str:
             out.append("Behavioral rules preserved:")
             out.extend(f"  - {r}" for r in stats.rules)
             out.append("")
-        out.append("PRUNED CONVERSATION:")
-        out.append(sep)
-        for t in pruned_turns:
-            label = "User" if t.role == "user" else "Assistant"
-            out.append(f"{label}: {t.content}")
+        # Capacity warning (FMECA)
+        from context_surgeon import MAX_STORE_RULES, REVIEW_MODE
+        if len(stats.rules) >= int(MAX_STORE_RULES * 0.8):
             out.append("")
+            if len(stats.rules) >= MAX_STORE_RULES:
+                out.append(f"WARNING: Rule store is FULL ({len(stats.rules)}/{MAX_STORE_RULES}). New rules will be dropped.")
+            else:
+                out.append(f"WARNING: Rule store is approaching capacity ({len(stats.rules)}/{MAX_STORE_RULES}).")
+
+        # Get info_flags for review mode
+        _, info_flags = extract_rules_with_store(turns, use_store=True)
+
+        if REVIEW_MODE and info_flags:
+            out.append("")
+            out.append("Near-duplicate candidates (informational only):")
+            for flag in info_flags[:3]:
+                out.append(f"  - {flag['new_rule']}")
         return "\n".join(out)
 
     if name == "create_briefing":
@@ -1666,6 +1714,15 @@ def _call_tool(name: str, args: dict) -> str:
             out.append("Near-duplicate candidates (informational only):")
             for flag in info_flags[:3]:
                 out.append(f"  - {flag['new_rule']}")
+
+        # Capacity warning (FMECA)
+        from context_surgeon import MAX_STORE_RULES
+        if len(rules) >= int(MAX_STORE_RULES * 0.8):
+            out.append("")
+            if len(rules) >= MAX_STORE_RULES:
+                out.append(f"WARNING: Rule store is FULL ({len(rules)}/{MAX_STORE_RULES}). New rules will be dropped.")
+            else:
+                out.append(f"WARNING: Rule store is approaching capacity ({len(rules)}/{MAX_STORE_RULES}).")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
