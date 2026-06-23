@@ -1079,6 +1079,12 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     # Skip save if no rules (FMECA)
     if not final_rules:
         return final_rules, info_flags
+
+    # Non-string safeguard before save (FMECA)
+    if any(not isinstance(r, str) for r in store.get("rules", [])):
+        import sys
+        print("ERROR: Attempted to save non-string rules. Aborting save.", file=sys.stderr)
+        return final_rules, info_flags
     _save_rules_store(store)
 
     return final_rules, info_flags
