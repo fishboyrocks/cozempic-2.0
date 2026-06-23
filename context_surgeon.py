@@ -133,7 +133,7 @@ AUDIT_LOG_PATH      = Path.home() / ".config" / "context-surgeon" / "audit.log"
 MAX_RULE_STORE_LEN_SAVE = 1200  # Max rule length allowed to be saved (FMECA)
 MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
-REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
+REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "1") == "1"
 _SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
