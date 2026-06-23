@@ -1058,7 +1058,8 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
 
     # Update store
 
-    # Final deduplication safeguard (FMECA)
+    # Always deduplicate exact matches before saving (FMECA)
+    final_rules = list(dict.fromkeys(final_rules))  # preserve order, remove dups
     if not REVIEW_MODE:
         final_rules = list(dict.fromkeys(final_rules))  # preserve order, remove dups
     store["rules"] = final_rules[:MAX_STORE_RULES]
