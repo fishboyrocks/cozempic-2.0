@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.7-alpha
+context_surgeon.py  v1.2.0-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.7-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.1.0-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -121,11 +121,26 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
+__version__         = "1.2.0-alpha"  # MINOR: configurable store + size cap + surfaced bigram flags
+
+# Static dual-constant version guard (replaces fragile file-reading approach)
+# Both of these MUST be updated together when bumping versions.
+_DOCSTRING_VERSION = "1.2.0-alpha"
+
+if _DOCSTRING_VERSION != __version__:
+    import warnings
+    warnings.warn(
+        f"VERSION MISMATCH: docstring says v{_DOCSTRING_VERSION} but __version__ is {__version__}",
+        stacklevel=2
+    )
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
-RULES_STORE_PATH    = Path.home() / ".config" / "context-surgeon" / "rules.json"
+RULES_STORE_PATH    = Path(
+    os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
+                   str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
+)
+MAX_STORE_RULES     = 500       # 1.1.1: hard cap to prevent unbounded growth
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
 MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # v1.0.5: raised from 350. Measured natural
@@ -877,8 +892,17 @@ def _load_rules_store() -> dict:
 
 
 def _save_rules_store(data: dict) -> None:
-    """Atomically save the rules store."""
+    """Atomically save the rules store with automatic backup."""
     RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Create backup of existing store before writing new one
+    if RULES_STORE_PATH.exists():
+        try:
+            backup_path = RULES_STORE_PATH.with_suffix(".json.bak")
+            backup_path.write_text(RULES_STORE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        except Exception:
+            pass  # Backup failure should not block the main write
+
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     _atomic_write(RULES_STORE_PATH, content)
 
@@ -945,12 +969,12 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     store = _load_rules_store()
     final_rules, info_flags = merge_rules(fresh_rules, store)
 
-    # Update store
-    store["rules"] = final_rules
+    # Update store (with hard cap)
+    store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
     _save_rules_store(store)
 
-    return final_rules, info_flags
+    return final_rules, info_flags  # info_flags now actually returned and usable
 
 
 # ---- Deduplication -----------------------------------------------------------
@@ -1495,12 +1519,17 @@ def _call_tool(name: str, args: dict) -> str:
     if name == "extract_rules":
         if not turns:
             return "No turns found."
-        rules = extract_rules(turns)
+        rules, info_flags = extract_rules_with_store(turns, use_store=True)
         if not rules:
             return "No behavioral correction rules detected in this conversation."
         sep = "-" * 40
         out = ["BEHAVIORAL CORRECTIONS:", sep]
         out.extend(f"{i}. {r}" for i, r in enumerate(rules, 1))
+        if info_flags:
+            out.append("")
+            out.append("Near-duplicate candidates (informational):")
+            for flag in info_flags[:3]:
+                out.append(f"  - {flag['new_rule']}")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
@@ -1728,6 +1757,16 @@ def cmd_prune(args: argparse.Namespace) -> None:
     for r in stats.rules[:5]:
         print(f"         -> {r[:72]}", file=sys.stderr)
     print(sep, file=sys.stderr)
+
+    # 1.1.0: Show near-duplicate informational flags if any were found
+    rules, info_flags = extract_rules_with_store(turns, use_store=True)
+    if info_flags:
+        print("
+Near-duplicate rule candidates detected (informational only):", file=sys.stderr)
+        for flag in info_flags[:3]:
+            print(f"  New: {flag['new_rule']}", file=sys.stderr)
+            for nd in flag.get('near_duplicates', []):
+                print(f"    ~ {nd['overlap']*100:.0f}% overlap with: {nd['rule']}", file=sys.stderr)
 
     output_path = getattr(args, "output", None)
     if output_path:
