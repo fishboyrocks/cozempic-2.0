@@ -162,6 +162,7 @@ _Initial release._
 - Add `context_surgeon.py`: CLI (`discover`, `diagnose`, `prune`, `setup-mcp`) and stdio MCP server (`diagnose_conversation`, `prune_conversation`, `create_briefing`, `extract_rules`) for pruning Claude Desktop conversation exports ([`8add84a`])
 
 [a8106c2]: https://github.com/fishboyrocks/cozempic-2.0/commit/a8106c26d24657ea4e443181dcbb0c56d0ad6dc6
+[2726c8a]: https://github.com/fishboyrocks/cozempic-2.0/commit/2726c8a1a64ba8576da389d0960dfc041ef7ab2f
 [6e50171]: https://github.com/fishboyrocks/cozempic-2.0/commit/6e501719865f8aade3cd433c8f7c0e0e7596a620
 [4d4b6d2]: https://github.com/fishboyrocks/cozempic-2.0/commit/4d4b6d208ef33e8caac4fdccbf736b06c7ffbb45
 [a51a15f]: https://github.com/fishboyrocks/cozempic-2.0/commit/a51a15fa4a058d9f2ecec8852b4be58a91b722a7
@@ -171,6 +172,7 @@ _Initial release._
 [aac5002]: https://github.com/fishboyrocks/cozempic-2.0/commit/aac5002f12c160b20db0159998955f8b736b58c9
 [8add84a]: https://github.com/fishboyrocks/cozempic-2.0/commit/8add84a3ff9e01a56c2178029ed97a74dff43487
 
+[1.0.8-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.8-alpha
 [1.0.7-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.7-alpha
 [1.0.6-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.6-alpha
 [1.0.5-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.5-alpha
