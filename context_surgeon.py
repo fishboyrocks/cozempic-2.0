@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.8-alpha
+context_surgeon.py  v1.0.9-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.8-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.9-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.0.8-alpha"
+__version__         = "1.0.9-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
@@ -199,16 +199,23 @@ _DATE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# v1.0.8: Claude Desktop's "Show more" truncation-button label appears
-# specifically under long USER messages -- confirmed against a real
-# 317K-char export where all 12 occurrences sat alone on their own line,
-# immediately followed by a date line, with clearly user-voiced text
-# immediately before them. Matched only when it sits alone on its own
-# line (start-or-newline before, newline-or-end after), NOT as a bare
-# substring -- Claude's own prose could plausibly contain the literal
-# phrase "show more" mid-sentence (e.g. "I'll show more examples below"),
-# and a naive substring match would misfire on that.
-_SHOW_MORE_LINE_RE = re.compile(r"(?:^|\n)[ \t]*Show more[ \t]*(?:\n|$)")
+# v1.0.9: Claude Desktop's truncation-toggle label appears as "Show more"
+# when a long USER message is collapsed and "Show less" when it has been
+# expanded -- the same UI element, two states. v1.0.8 only matched "Show
+# more" and found zero matches against a real export where the user had
+# expanded every long message before copying, making it look like the
+# whole approach didn't apply there; it just needed the other half of the
+# same toggle. Confirmed against that export: all 9 "Show less" lines sit
+# alone on their own line, in the identical structural position "Show
+# more" occupies elsewhere (immediately before a date line, immediately
+# after clearly user-voiced text). Matched only when it sits alone on its
+# own line, NOT as a bare substring -- "show less" is a materially higher
+# false-positive risk than "show more" was, since "I want to show less
+# skin in this outfit" is exactly the kind of sentence a fashion-
+# consultation conversation could plausibly contain; checked the real
+# export directly and found no such case, but the standalone-line
+# requirement is what actually protects against it, not luck.
+_SHOW_TOGGLE_LINE_RE = re.compile(r"(?:^|\n)[ \t]*Show (?:more|less)[ \t]*(?:\n|$)")
 
 # Structural red flag for Claude's own formatting style (all-caps label,
 # markdown header, bold-label opener), used to exclude likely-misattributed
@@ -318,7 +325,7 @@ class Turn:
     content:    str
     index:      int = 0
     confidence: str = "verified"  # "verified" | "inferred" -- see
-                                    # _split_show_more_chunk (v1.0.8). New
+                                    # _split_show_toggle_chunk (v1.0.8). New
                                     # field with a default; existing
                                     # Turn(role=..., content=..., index=...)
                                     # construction calls remain valid.
@@ -527,27 +534,30 @@ def _turns_from_matches(
     return turns
 
 
-def _split_show_more_chunk(chunk: str) -> tuple[str, str | None]:
+def _split_show_toggle_chunk(chunk: str) -> tuple[str, str | None]:
     """
     Within a single Format-3 assistant-labeled chunk, detect a trailing
-    "Show more" marker and split off a best-effort, deliberately partial
-    candidate for the user's next message.
+    "Show more"/"Show less" toggle marker and split off a best-effort,
+    deliberately partial candidate for the user's next message.
 
     Background: Format 3 (date-separator) parsing cannot tell where Claude's
     response ends and the user's next message begins within a merged chunk,
     since there is no marker for that boundary -- this has been a documented
-    limitation since v1.0.1. "Show more" gives a marker for where a long
-    user message ENDS (confirmed against a real 317K-char export: all 12
-    occurrences sat alone on their own line, immediately preceded by
-    clearly user-voiced text, immediately followed by a date line), but NOT
-    for where it BEGINS. Capturing the whole message risks grabbing the
-    tail of Claude's own response and mislabeling it as the user's words;
-    capturing only the last paragraph immediately before "Show more" is the
-    safer alternative, at the cost of only capturing PART of the message
-    when it spans multiple paragraphs.
+    limitation since v1.0.1. Claude Desktop's truncation toggle gives a
+    marker for where a long user message ENDS (confirmed against two real
+    exports: one with 12 "Show more" occurrences from a capture where long
+    messages were left collapsed, another with 9 "Show less" occurrences
+    from a capture where the user had expanded every long message before
+    copying -- same UI element, two states, both sitting alone on their own
+    line, immediately preceded by clearly user-voiced text, immediately
+    followed by a date line), but NOT for where it BEGINS. Capturing the
+    whole message risks grabbing the tail of Claude's own response and
+    mislabeling it as the user's words; capturing only the last paragraph
+    immediately before the marker is the safer alternative, at the cost of
+    only capturing PART of the message when it spans multiple paragraphs.
 
     Even the last-paragraph chunk is not guaranteed correct: checked against
-    the same real export, 1 of 12 candidates ("FORMULA A: Transit Hub
+    the "Show more" export, 1 of 12 candidates ("FORMULA A: Transit Hub
     Defensive Armor...") was clearly Claude's own structured-output style,
     not user content. _CLAUDE_STRUCTURE_RE excludes that specific pattern,
     but this is a best-effort filter, not a guarantee. Callers must treat
@@ -556,12 +566,20 @@ def _split_show_more_chunk(chunk: str) -> tuple[str, str | None]:
 
     Returns (remaining_assistant_text, inferred_user_chunk_or_None).
     """
-    m = _SHOW_MORE_LINE_RE.search(chunk)
+    m = _SHOW_TOGGLE_LINE_RE.search(chunk)
     if m is None:
         return chunk, None
 
-    sm_start = chunk.rfind("Show more", 0, m.end())
-    end_of_content = sm_start
+    # v1.0.9 fix: find the boundary using m.start() directly, rather than
+    # re-searching for a hardcoded "Show more" substring -- that hardcoding
+    # silently broke for "Show less" matches (rfind returns -1, corrupting
+    # every position computed from it). m.start() always lands exactly at
+    # the newline immediately before the marker line (or position 0 if the
+    # marker opens the chunk), in both the "^" and "\n" branches of the
+    # pattern's leading alternation -- verified directly rather than
+    # assumed, since an earlier, more convoluted attempt at this same fix
+    # turned out to be wrong on inspection.
+    end_of_content = m.start()
     while end_of_content > 0 and chunk[end_of_content - 1] in " \t\n":
         end_of_content -= 1
 
@@ -571,7 +589,7 @@ def _split_show_more_chunk(chunk: str) -> tuple[str, str | None]:
 
     if not candidate or _CLAUDE_STRUCTURE_RE.match(candidate):
         # Nothing there, or too risky to attribute -- keep the whole chunk
-        # as assistant content, just drop the "Show more" UI noise itself.
+        # as assistant content, just drop the toggle-label UI noise itself.
         remaining = (chunk[:m.start()] + chunk[m.end():]).strip()
         return remaining, None
 
@@ -601,9 +619,10 @@ def _parse_text(source: str) -> list[Turn]:
         (never dropped).  Each subsequent inter-date block = assistant turn.
         Inter-date blocks may contain a concatenated Claude response AND
         the user's next message when no solo-line labels are present --
-        v1.0.8 added a best-effort split using "Show more" (Claude
-        Desktop's truncation-button label, which only appears under long
-        USER messages) as an additional boundary signal, but this is
+        v1.0.8 added a best-effort split using Claude Desktop's truncation
+        toggle ("Show more" when collapsed, "Show less" once expanded --
+        v1.0.8 initially only matched "more" and missed every "less" case,
+        fixed in v1.0.9) as an additional boundary signal, but this is
         approximate, not a reliable role label: it only fires for messages
         long enough to trigger that UI element, it can only capture the
         last paragraph before the marker (there's no symmetric signal for
@@ -667,9 +686,9 @@ def _parse_text(source: str) -> list[Turn]:
             # v1.0.8: a "Show more" marker near the end of this chunk means
             # it actually contains [Claude's response] + [the user's next
             # message] merged with no marker between them -- see
-            # _split_show_more_chunk's docstring for what this can and
+            # _split_show_toggle_chunk's docstring for what this can and
             # cannot guarantee.
-            assistant_part, inferred_user = _split_show_more_chunk(chunk)
+            assistant_part, inferred_user = _split_show_toggle_chunk(chunk)
             if assistant_part:
                 turns.append(Turn(role="assistant", content=assistant_part, index=idx))
                 idx += 1
@@ -709,10 +728,17 @@ def strip_xml_noise(text: str) -> str:
 
 def strip_ui_artifacts(text: str) -> str:
     """
-    Remove Claude Desktop copy-paste UI chrome: the literal "Show more"
-    expand-button label, and doubled thinking-summary lines (Claude Desktop
-    renders the collapsed-thinking summary as both a label element and
-    flattened text, so Ctrl+A/Ctrl+C/Ctrl+V produces it twice in a row).
+    Remove Claude Desktop copy-paste UI chrome: the literal "Show more" /
+    "Show less" truncation-toggle label (same UI element, two states --
+    "Show less" appears once a long message has been expanded), and
+    doubled thinking-summary lines (Claude Desktop renders the
+    collapsed-thinking summary as both a label element and flattened
+    text, so Ctrl+A/Ctrl+C/Ctrl+V produces it twice in a row).
+
+    This is an independent defense layer from _split_show_toggle_chunk:
+    it runs on every turn regardless of which Format matched during
+    parsing, including Format 1/2 captures where the toggle-aware
+    splitting in Format 3 never executes at all.
 
     Only collapses adjacent duplicate lines at or under _DUP_LINE_MAX_LEN
     chars, so legitimate longer repeated content is left to deduplicate().
@@ -723,7 +749,7 @@ def strip_ui_artifacts(text: str) -> str:
     while i < len(lines):
         line     = lines[i]
         stripped = line.strip()
-        if stripped == "Show more":
+        if stripped in ("Show more", "Show less"):
             i += 1
             continue
         if (
@@ -965,7 +991,7 @@ def extract_rules(turns: list[Turn]) -> list[str]:
     Patterns: "don't do X", "never use Y", "always add Z",
               "from now on", "remember that", "make sure to" ...
 
-    v1.0.8: turns with confidence="inferred" (see _split_show_more_chunk)
+    v1.0.8: turns with confidence="inferred" (see _split_show_toggle_chunk)
     are scanned the same way, but any rule drawn from one gets an explicit
     "[INFERRED...]" prefix. These turns were never confidently attributed
     to the user in the first place -- the prefix carries that uncertainty
