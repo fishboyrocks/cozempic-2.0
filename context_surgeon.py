@@ -1638,12 +1638,23 @@ def _call_tool(name: str, args: dict) -> str:
             out.append("Behavioral rules preserved:")
             out.extend(f"  - {r}" for r in stats.rules)
             out.append("")
-        out.append("PRUNED CONVERSATION:")
-        out.append(sep)
-        for t in pruned_turns:
-            label = "User" if t.role == "user" else "Assistant"
-            out.append(f"{label}: {t.content}")
+        # Capacity warning (FMECA)
+        from context_surgeon import MAX_STORE_RULES, REVIEW_MODE
+        if len(stats.rules) >= int(MAX_STORE_RULES * 0.8):
             out.append("")
+            if len(stats.rules) >= MAX_STORE_RULES:
+                out.append(f"WARNING: Rule store is FULL ({len(stats.rules)}/{MAX_STORE_RULES}). New rules will be dropped.")
+            else:
+                out.append(f"WARNING: Rule store is approaching capacity ({len(stats.rules)}/{MAX_STORE_RULES}).")
+
+        # Get info_flags for review mode
+        _, info_flags = extract_rules_with_store(turns, use_store=True)
+
+        if REVIEW_MODE and info_flags:
+            out.append("")
+            out.append("Near-duplicate candidates (informational only):")
+            for flag in info_flags[:3]:
+                out.append(f"  - {flag['new_rule']}")
         return "\n".join(out)
 
     if name == "create_briefing":
