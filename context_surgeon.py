@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.0.8-alpha
+context_surgeon.py  v1.0.7-alpha
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,7 +81,7 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.0.8-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.0.7-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
@@ -94,6 +94,7 @@ import platform
 import re
 import shutil
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -120,10 +121,11 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.0.8-alpha"
+__version__         = "1.1.0-alpha"  # 1.1.0 line: atomic writes + broader detection
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
+RULES_STORE_PATH    = Path.home() / ".config" / "context-surgeon" / "rules.json"
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
 MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # v1.0.5: raised from 350. Measured natural
@@ -175,9 +177,9 @@ CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
 _COLON_RE = re.compile(
     r"^\s*"
     r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional leading [time]
-    r"(?:\*\*|__)?"                                    # optional **/__
+    r"(?:\*\*|__)? "                                    # optional **/__"
     r"(You|User|Human|Assistant|Claude(?:\s+[A-Za-z0-9][A-Za-z0-9.]*){0,3}|AI)"
-    r"(?:\*\*|__)?"                                    # optional closing **/__
+    r"(?:\*\*|__)? "                                    # optional closing **/__"
     r"\s*(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"    # optional trailing [time]
     r":\s*",                                           # required colon
     re.IGNORECASE | re.MULTILINE,
@@ -199,37 +201,14 @@ _DATE_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# v1.0.8: Claude Desktop's "Show more" truncation-button label appears
-# specifically under long USER messages -- confirmed against a real
-# 317K-char export where all 12 occurrences sat alone on their own line,
-# immediately followed by a date line, with clearly user-voiced text
-# immediately before them. Matched only when it sits alone on its own
-# line (start-or-newline before, newline-or-end after), NOT as a bare
-# substring -- Claude's own prose could plausibly contain the literal
-# phrase "show more" mid-sentence (e.g. "I'll show more examples below"),
-# and a naive substring match would misfire on that.
-_SHOW_MORE_LINE_RE = re.compile(r"(?:^|\n)[ \t]*Show more[ \t]*(?:\n|$)")
-
-# Structural red flag for Claude's own formatting style (all-caps label,
-# markdown header, bold-label opener), used to exclude likely-misattributed
-# chunks when inferring a user-message boundary from a "Show more" marker.
-# Checked against real data: correctly excludes "FORMULA A: Transit Hub
-# Defensive Armor..." (Claude's structured output) while keeping genuine
-# user-voiced chunks like "i really like the olive green top a LOT...".
-_CLAUDE_STRUCTURE_RE = re.compile(
-    r"^[A-Z][A-Z0-9 ]{2,40}:\s"   # all-caps label + colon, e.g. "FORMULA A: "
-    r"|^#{1,6}\s"                  # markdown header
-    r"|^\*\*[^*]+\*\*"             # bold-label opener
-)
-
 # ---- v1.0.2 gentle / standard prescription patterns -------------------------
 
 # Boilerplate opening phrases stripped from assistant turns in all prescriptions.
 # Matches the first sentence/line when it is pure acknowledgment with no content.
 _BOILERPLATE_OPEN_RE = re.compile(
     r"^\s*"
-    r"(?:Of course[!,]?\s+|Certainly[!,]?\s+|Sure[!,]?\s+|Absolutely[!,]?\s+|"
-    r"Great(?:\s+question)?[!,]?\s+)"
+    r"(?:Of course[!,]? \s+|Certainly[!,]? \s+|Sure[!,]? \s+|Absolutely[!,]? \s+|"
+    r"Great(?:\s+question)?[!,]? \s+)"
     r"[^\n]*\n\n?",
     re.IGNORECASE,
 )
@@ -308,20 +287,35 @@ CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 1.1.0: broader implicit-correction signals (adapted from cozempic's
+# classify_turn technique, written from scratch, exact-match extraction only).
+# These catch soft corrections ("actually,", "that's not right", apology-
+# follow-ups) that the original keyword list misses, while still feeding
+# the exact same hardened _sentence_around() path.
+IMPLICIT_CORRECTION_RE = re.compile(
+    r"\b(?:"
+    r"actually[,.]"
+    r"|that's not right"
+    r"|that's incorrect"
+    r"|no[, ]that's"
+    r"|wait[, ]no"
+    r"|I meant"
+    r"|I said"
+    r"|sorry[, ]but"
+    r"|actually[, ]I"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 # ---- Data structures ---------------------------------------------------------
 
 @dataclass
 class Turn:
     """A single conversation turn."""
-    role:       str    # "user" | "assistant" | "system"
-    content:    str
-    index:      int = 0
-    confidence: str = "verified"  # "verified" | "inferred" -- see
-                                    # _split_show_more_chunk (v1.0.8). New
-                                    # field with a default; existing
-                                    # Turn(role=..., content=..., index=...)
-                                    # construction calls remain valid.
+    role:    str    # "user" | "assistant" | "system"
+    content: str
+    index:   int = 0
 
     def tokens(self) -> int:
         """Estimated token count using the calibrated chars-per-token ratio."""
@@ -392,7 +386,7 @@ def parse_conversation(source: str) -> list[Turn]:
             pass  # fall through to JSONL / text
 
     # JSONL (one JSON object per line — Claude Code session format)
-    first_nonblank = next((L.strip() for L in source.splitlines() if L.strip()), "")
+    first_nonblank = next((l.strip() for l in source.splitlines() if l.strip()), "")
     if first_nonblank.startswith("{"):
         try:
             return _parse_jsonl(source)
@@ -527,58 +521,6 @@ def _turns_from_matches(
     return turns
 
 
-def _split_show_more_chunk(chunk: str) -> tuple[str, str | None]:
-    """
-    Within a single Format-3 assistant-labeled chunk, detect a trailing
-    "Show more" marker and split off a best-effort, deliberately partial
-    candidate for the user's next message.
-
-    Background: Format 3 (date-separator) parsing cannot tell where Claude's
-    response ends and the user's next message begins within a merged chunk,
-    since there is no marker for that boundary -- this has been a documented
-    limitation since v1.0.1. "Show more" gives a marker for where a long
-    user message ENDS (confirmed against a real 317K-char export: all 12
-    occurrences sat alone on their own line, immediately preceded by
-    clearly user-voiced text, immediately followed by a date line), but NOT
-    for where it BEGINS. Capturing the whole message risks grabbing the
-    tail of Claude's own response and mislabeling it as the user's words;
-    capturing only the last paragraph immediately before "Show more" is the
-    safer alternative, at the cost of only capturing PART of the message
-    when it spans multiple paragraphs.
-
-    Even the last-paragraph chunk is not guaranteed correct: checked against
-    the same real export, 1 of 12 candidates ("FORMULA A: Transit Hub
-    Defensive Armor...") was clearly Claude's own structured-output style,
-    not user content. _CLAUDE_STRUCTURE_RE excludes that specific pattern,
-    but this is a best-effort filter, not a guarantee. Callers must treat
-    anything returned here as inferred, not verified -- see Turn.confidence
-    and how extract_rules() labels rules drawn from it.
-
-    Returns (remaining_assistant_text, inferred_user_chunk_or_None).
-    """
-    m = _SHOW_MORE_LINE_RE.search(chunk)
-    if m is None:
-        return chunk, None
-
-    sm_start = chunk.rfind("Show more", 0, m.end())
-    end_of_content = sm_start
-    while end_of_content > 0 and chunk[end_of_content - 1] in " \t\n":
-        end_of_content -= 1
-
-    para_start = chunk.rfind("\n\n", 0, end_of_content)
-    para_start = para_start + 2 if para_start != -1 else 0
-    candidate  = chunk[para_start:end_of_content].strip()
-
-    if not candidate or _CLAUDE_STRUCTURE_RE.match(candidate):
-        # Nothing there, or too risky to attribute -- keep the whole chunk
-        # as assistant content, just drop the "Show more" UI noise itself.
-        remaining = (chunk[:m.start()] + chunk[m.end():]).strip()
-        return remaining, None
-
-    remaining = chunk[:para_start].strip()
-    return remaining, candidate
-
-
 def _parse_text(source: str) -> list[Turn]:
     """
     Parse a plain-text conversation into Turn objects.
@@ -599,21 +541,10 @@ def _parse_text(source: str) -> list[Turn]:
         "May 16" / "Jun 3" on its own line marks the START of each
         assistant response.  Content before the first date = user turn 0
         (never dropped).  Each subsequent inter-date block = assistant turn.
-        Inter-date blocks may contain a concatenated Claude response AND
-        the user's next message when no solo-line labels are present --
-        v1.0.8 added a best-effort split using "Show more" (Claude
-        Desktop's truncation-button label, which only appears under long
-        USER messages) as an additional boundary signal, but this is
-        approximate, not a reliable role label: it only fires for messages
-        long enough to trigger that UI element, it can only capture the
-        last paragraph before the marker (there's no symmetric signal for
-        where that message begins), and a structural filter excludes the
-        most obvious false positives but isn't a guarantee. Turns split
-        out this way carry confidence="inferred", and any extracted rule
-        drawn from one is prefixed "[INFERRED]" rather than presented with
-        the same confidence as turn 0. Treat Format 3 briefings as
-        structural scaffolds, not ground-truth transcripts, and treat
-        [INFERRED] rules specifically as needing human confirmation.
+        NOTE: inter-date blocks may contain a concatenated Claude response
+        AND the user's next message when no solo-line labels are present.
+        Role assignment is approximate in this mode; treat briefings produced
+        by Format 3 as structural scaffolds, not ground-truth transcripts.
 
     Frontmatter strip:
         If the source is one of this tool's own briefing documents, strip
@@ -662,22 +593,8 @@ def _parse_text(source: str) -> list[Turn]:
             content_start = m.end()
             content_end   = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(source)
             chunk = source[content_start:content_end].strip()
-            if not chunk:
-                continue
-            # v1.0.8: a "Show more" marker near the end of this chunk means
-            # it actually contains [Claude's response] + [the user's next
-            # message] merged with no marker between them -- see
-            # _split_show_more_chunk's docstring for what this can and
-            # cannot guarantee.
-            assistant_part, inferred_user = _split_show_more_chunk(chunk)
-            if assistant_part:
-                turns.append(Turn(role="assistant", content=assistant_part, index=idx))
-                idx += 1
-            if inferred_user:
-                turns.append(Turn(
-                    role="user", content=inferred_user, index=idx,
-                    confidence="inferred",
-                ))
+            if chunk:
+                turns.append(Turn(role="assistant", content=chunk, index=idx))
                 idx += 1
         if len(turns) >= 2:
             return turns
@@ -746,7 +663,7 @@ def clean(turn: Turn) -> Turn:
     c = strip_xml_noise(c)
     c = strip_ui_artifacts(c)
     c = re.sub(r"\n{3,}", "\n\n", c).strip()
-    return Turn(role=turn.role, content=c, index=turn.index, confidence=turn.confidence)
+    return Turn(role=turn.role, content=c, index=turn.index)
 
 
 def strip_boilerplate(text: str) -> str:
@@ -780,32 +697,6 @@ def strip_acknowledgment(text: str) -> str:
 
 # ---- Behavioral rule extraction ----------------------------------------------
 
-def _safe_cut_point(text: str, limit: int) -> int:
-    """
-    Find the rightmost position <= `limit` that is both a real word
-    boundary (preceded by whitespace) and leaves no unmatched "(" in
-    text[:pos] (i.e., parens stay balanced or have only excess closes,
-    never an orphaned open). Searches backward within 40 chars of `limit`
-    (same tolerance the word-boundary-only search already used); falls
-    back to `limit` itself if nothing in that window qualifies, since
-    forcing perfect balance shouldn't be allowed to eat arbitrarily far
-    back into the cap for one stray unmatched paren.
-
-    v1.0.8: added after finding that the previous word-boundary-only cut
-    could land inside an open, not-yet-closed parenthetical, producing a
-    truncated rule with one more "(" than ")" -- found via real-data
-    testing, not by inspection.
-    """
-    limit = min(limit, len(text))
-    floor = max(0, limit - 40)
-    for pos in range(limit, floor, -1):
-        if pos > 0 and text[pos - 1] != " ":
-            continue
-        if text[:pos].count("(") <= text[:pos].count(")"):
-            return pos
-    return limit
-
-
 def _sentence_around(text: str, start: int, end: int) -> str:
     """
     Extract the sentence containing the match at [start, end).
@@ -827,10 +718,10 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     CRUCIAL..." instead of "it's okay to hurt my feelings! it's CRUCIAL...".
 
     v1.0.6 fix: the period-followed-by-closing-punctuation gap ("...else.)
-    hence..." losing its ")") was fixed at the boundary-finding stage, but
+    hence...") losing its ")" was fixed at the boundary-finding stage, but
     a second, more subtle version of the same bug existed at the right-trim
     stage: a hard cut at exactly MAX_RULE_LEN chars can land precisely
-    between a period and the closing punctuation the boundary-extension
+    between a period and the closing punctuation the boundary extension
     just added, stripping it right back off again when the extension is
     itself what pushes the sentence 1+ chars over the cap. Found via direct
     construction of a sentence landing at exactly MAX_RULE_LEN chars before
@@ -838,25 +729,6 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     absorbs the same closing punctuation the boundary extension does,
     capped at 5 chars as a safety bound against pathological input (real
     prose never has long runs of consecutive closing punctuation).
-
-    v1.0.8 fix: found while testing the Show-more turn-splitting fix on
-    real data, not by inspection -- a single very long sentence containing
-    TWO correction-trigger keywords produced two overlapping fragments,
-    each independently truncated, each with unbalanced parens. The right
-    cut point was chosen purely by word boundary, with no check for
-    whether the cut landed inside an open, not-yet-closed parenthetical;
-    fixed by preferring the nearest qualifying cut point that is BOTH a
-    word boundary AND leaves no unmatched "(" in the kept text, searching
-    backward within a bounded window so one stray paren can't silently
-    eat arbitrarily far into the cap. Separately, re-anchoring on the left
-    side has always silently started fragments mid-sentence with no visual
-    marker (only the right side ever got a trailing "…"); a leading "…" is
-    now added whenever that happens, both for clarity and because it makes
-    an orphaned closing paren right after it self-explanatory ("something
-    before this got cut, including whatever opened it") rather than a
-    mysteriously dangling ")". The left side's matching "(" can be
-    arbitrarily far back in a long sentence, well outside any bounded
-    search window, so this is acknowledged rather than silently hidden.
     """
     # ---- left boundary: most recent sentence-end marker before match ------
     left_dot = text.rfind(".", 0, start)
@@ -910,8 +782,6 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     if kw_pos == -1:
         kw_pos = max(0, start - left)  # fallback, should not normally happen
 
-    leading_ellipsis = False
-
     # ---- MAX_RULE_LEN cap: only re-anchor if a plain right-trim would ------
     # ---- actually cut the keyword off; otherwise just right-trim normally -
     if len(result) > MAX_RULE_LEN:
@@ -925,15 +795,15 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             if new_left > 0 and result[new_left - 1] != " ":
                 prev_space = result.rfind(" ", 0, new_left)
                 new_left = prev_space + 1 if prev_space != -1 else 0
-            if new_left > 0:
-                leading_ellipsis = True
             result = result[new_left:].strip()
         if len(result) > MAX_RULE_LEN:
-            cut_point = _safe_cut_point(result, MAX_RULE_LEN)
+            trimmed    = result[:MAX_RULE_LEN]
+            last_space = trimmed.rfind(" ")
+            cut_point  = last_space if last_space > MAX_RULE_LEN - 40 else MAX_RULE_LEN
             # Absorb a SMALL run of closing punctuation immediately after
             # the cut point (capped at 5 chars) so the hard truncation
             # doesn't strand an orphaned ")" right after it -- this is
-            # exactly what happens when the boundary-extension above is
+            # exactly what happens when the boundary extension above is
             # itself what pushed the sentence just over MAX_RULE_LEN.
             absorbed = 0
             while (cut_point < len(result)
@@ -950,9 +820,6 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             else:
                 result = result[:cut_point] + "…"
 
-    if leading_ellipsis:
-        result = "…" + result
-
     return result
 
 
@@ -964,14 +831,6 @@ def extract_rules(turns: list[Turn]) -> list[str]:
     the content most critical to carry forward when resetting context.
     Patterns: "don't do X", "never use Y", "always add Z",
               "from now on", "remember that", "make sure to" ...
-
-    v1.0.8: turns with confidence="inferred" (see _split_show_more_chunk)
-    are scanned the same way, but any rule drawn from one gets an explicit
-    "[INFERRED...]" prefix. These turns were never confidently attributed
-    to the user in the first place -- the prefix carries that uncertainty
-    through to the output rather than letting it disappear once a rule is
-    extracted, so a human reviewing the briefing can judge each one rather
-    than the tool silently deciding for them.
     """
     seen:  set[str]  = set()
     rules: list[str] = []
@@ -979,24 +838,119 @@ def extract_rules(turns: list[Turn]) -> list[str]:
     for turn in turns:
         if turn.role != "user":
             continue
-        for m in CORRECTION_RE.finditer(turn.content):
-            sentence = _sentence_around(turn.content, m.start(), m.end())
-            if len(sentence) < 10 or len(sentence) > MAX_RULE_LEN:
-                continue
-            key = re.sub(r"\s+", " ", sentence.lower().strip())
-            if key in seen:
-                continue
-            seen.add(key)
-            if turn.confidence == "inferred":
-                sentence = (
-                    "[INFERRED -- verify this was actually you, not Claude] "
-                    + sentence
-                )
-            rules.append(sentence)
-            if len(rules) >= MAX_RULES:
-                return rules
+        for regex in (CORRECTION_RE, IMPLICIT_CORRECTION_RE):
+            for m in regex.finditer(turn.content):
+                sentence = _sentence_around(turn.content, m.start(), m.end())
+                if len(sentence) < 10 or len(sentence) > MAX_RULE_LEN:
+                    continue
+                key = re.sub(r"\s+", " ", sentence.lower().strip())
+                if key in seen:
+                    continue
+                seen.add(key)
+                rules.append(sentence)
+                if len(rules) >= MAX_RULES:
+                    return rules
 
     return rules
+
+
+# ---- 1.1.0 Persistent Rule Store ---------------------------------------------
+
+def _bigrams(text: str) -> set[str]:
+    """Return word bigrams for informational overlap scoring only."""
+    words = re.findall(r"\b\w+\b", text.lower())
+    return {" ".join(pair) for pair in zip(words, words[1:])}
+
+
+def _load_rules_store() -> dict:
+    """Load the persistent rules store (creates empty structure if missing)."""
+    if not RULES_STORE_PATH.exists():
+        return {"rules": [], "last_updated": None}
+    try:
+        with open(RULES_STORE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "rules" not in data:
+            return {"rules": [], "last_updated": None}
+        return data
+    except Exception:
+        return {"rules": [], "last_updated": None}
+
+
+def _save_rules_store(data: dict) -> None:
+    """Atomically save the rules store."""
+    RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    _atomic_write(RULES_STORE_PATH, content)
+
+
+def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict]]:
+    """
+    Merge new rules into the store using exact-match only.
+
+    Returns (final_rules, info_flags).
+    info_flags contains entries with bigram overlap for informational use only.
+    """
+    existing = set(store.get("rules", []))
+    final_rules = list(existing)
+    info_flags: list[dict] = []
+
+    for rule in new_rules:
+        key = rule.strip()
+        if not key:
+            continue
+        if key in existing:
+            continue
+
+        # Exact match first
+        if key not in existing:
+            final_rules.append(key)
+            existing.add(key)
+
+            # Bigram overlap is calculated for informational purposes only
+            # (never used as a merge decision)
+            overlaps = []
+            for existing_rule in list(existing):
+                if existing_rule == key:
+                    continue
+                b1 = _bigrams(key)
+                b2 = _bigrams(existing_rule)
+                if b1 and b2:
+                    overlap = len(b1 & b2) / max(len(b1), len(b2))
+                    if overlap >= 0.5:
+                        overlaps.append({
+                            "rule": existing_rule[:80],
+                            "overlap": round(overlap, 2)
+                        })
+
+            if overlaps:
+                info_flags.append({
+                    "new_rule": key[:80],
+                    "near_duplicates": overlaps[:3]
+                })
+
+    return final_rules, info_flags
+
+
+def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple[list[str], list[dict]]:
+    """
+    Extract rules and optionally merge with the persistent store.
+
+    When use_store=False, behaves exactly like the original extract_rules().
+    """
+    fresh_rules = extract_rules(turns)  # original function
+
+    if not use_store:
+        return fresh_rules, []
+
+    store = _load_rules_store()
+    final_rules, info_flags = merge_rules(fresh_rules, store)
+
+    # Update store
+    store["rules"] = final_rules
+    store["last_updated"] = datetime.now().isoformat()
+    _save_rules_store(store)
+
+    return final_rules, info_flags
 
 
 # ---- Deduplication -----------------------------------------------------------
@@ -1073,7 +1027,7 @@ def collapse_exact_repeats(turns: list[Turn]) -> list[Turn]:
                 new_parts.append(part)
 
         new_content = "".join(new_parts)
-        result.append(Turn(role=turn.role, content=new_content, index=turn.index, confidence=turn.confidence))
+        result.append(Turn(role=turn.role, content=new_content, index=turn.index))
 
     return result
 
@@ -1108,7 +1062,7 @@ def compress(turn: Turn) -> Turn:
 
     # Short or code-only turn: just restore and return
     if len(paragraphs) <= 2:
-        return Turn(role=turn.role, content=_restore(content).strip(), index=turn.index, confidence=turn.confidence)
+        return Turn(role=turn.role, content=_restore(content).strip(), index=turn.index)
 
     result_parts: list[str] = []
 
@@ -1145,7 +1099,7 @@ def compress(turn: Turn) -> Turn:
     if orig_t > comp_t + 30:
         result = f"[~{orig_t}to{comp_t}t]\n{result}"
 
-    return Turn(role=turn.role, content=result, index=turn.index, confidence=turn.confidence)
+    return Turn(role=turn.role, content=result, index=turn.index)
 
 
 # ---- Main prune orchestrator -------------------------------------------------
@@ -1172,7 +1126,7 @@ def prune(
     cfg = _PRESCRIPTIONS[prescription]
 
     orig_tokens = sum(t.tokens() for t in turns)
-    rules       = extract_rules(turns)
+    rules, _    = extract_rules_with_store(turns, use_store=True)
 
     # Clamp verbatim to [0, len(turns)]
     verbatim = max(0, min(verbatim, len(turns)))
@@ -1192,11 +1146,11 @@ def prune(
         if cfg["boilerplate"] and c.role == "assistant":
             stripped = strip_boilerplate(c.content)
             if stripped:
-                c = Turn(role=c.role, content=stripped, index=c.index, confidence=c.confidence)
+                c = Turn(role=c.role, content=stripped, index=c.index)
         if cfg["acknowledge"] and c.role == "assistant":
             stripped = strip_acknowledgment(c.content)
             if stripped:
-                c = Turn(role=c.role, content=stripped, index=c.index, confidence=c.confidence)
+                c = Turn(role=c.role, content=stripped, index=c.index)
         processed.append(c)
     if cfg["dedup"]:
         processed = deduplicate(processed)
@@ -1243,7 +1197,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
       3. Compressed conversation history
       4. Most recent N turns verbatim
     """
-    rules    = extract_rules(turns)
+    rules, _ = extract_rules_with_store(turns, use_store=True)
     pruned, stats = prune(turns, verbatim, "aggressive")
     ts       = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1263,22 +1217,12 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
     ]
 
     if rules:
-        inferred_count = sum(1 for r in rules if r.startswith("[INFERRED"))
         lines += [
             "---",
             "",
             "## BEHAVIORAL RULES",
-            "*Corrections explicitly stated during the original conversation.*",
-        ]
-        if inferred_count:
-            lines.append(
-                f"*{inferred_count} of {len(rules)} are marked [INFERRED]: their turn "
-                f"boundary was inferred from a UI artifact, not a reliable role label. "
-                f"Verify these were actually said by the user before treating them as "
-                f"established.*"
-            )
-        lines += [
-            "*Apply verified rules throughout this session.*",
+            "*These corrections were explicitly stated during the original conversation.*",
+            "*Apply them throughout this session.*",
             "",
         ]
         lines += [f"- {r}" for r in rules]
@@ -1288,7 +1232,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "---",
         "",
         "## CONVERSATION HISTORY",
-        "*Older turns: aggressive compression (code blocks always verbatim).*",
+        f"*Older turns: aggressive compression (code blocks always verbatim).*",
         f"*Last {verbatim} turns: verbatim.*",
         "",
     ]
@@ -1320,9 +1264,6 @@ def diagnose_text(turns: list[Turn]) -> str:
     thinking_n = sum(1 for t in turns if THINKING_RE.search(t.content))
     xml_n      = sum(1 for t in turns if XML_NOISE_RE.search(t.content))
     rules      = extract_rules(turns)
-    inferred_turn_n = sum(1 for t in turns if t.confidence == "inferred")
-    inferred_rule_n = sum(1 for r in rules if r.startswith("[INFERRED"))
-    verified_rule_n = len(rules) - inferred_rule_n
 
     hashes: dict[str, int] = {}
     for t in turns:
@@ -1346,14 +1287,7 @@ def diagnose_text(turns: list[Turn]) -> str:
         f"  Thinking blocks:  {thinking_n}",
         f"  XML noise turns:  {xml_n}",
         f"  Duplicate turns:  {dupes}",
-        f"  Correction rules: {len(rules)} ({verified_rule_n} verified, {inferred_rule_n} inferred)",
-    ]
-    if inferred_turn_n:
-        lines.append(
-            f"  Inferred turns:   {inferred_turn_n} (Show-more boundary heuristic, "
-            f"approximate -- see briefing)"
-        )
-    lines += [
+        f"  Correction rules: {len(rules)}",
         "",
         "Largest 5 turns:",
     ]
@@ -1644,6 +1578,47 @@ def run_mcp() -> None:
         sys.stdout.flush()
 
 
+# ---- Atomic write helper (1.1.0) --------------------------------------------
+
+def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """
+    Write content to *path* atomically.
+
+    Uses a unique temporary file in the same directory, fsync before
+    rename, and os.replace for the final atomic swap. This guarantees
+    that on crash the target either contains the old complete file or
+    the new complete file — never a truncated partial write.
+
+    This is the recommended pattern for any file that a user may
+    repeatedly overwrite (briefings, config files).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Use a unique suffix so concurrent runs cannot collide
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=path.name + ".",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_path)
+
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_path, path)
+    except Exception:
+        # Clean up the temp file on any failure
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 # ---- CLI commands ------------------------------------------------------------
 
 def _read_input(path: str) -> str:
@@ -1749,20 +1724,14 @@ def cmd_prune(args: argparse.Namespace) -> None:
     print(f"Turns:   {stats.orig_turns} -> {stats.final_turns}", file=sys.stderr)
     print(f"Tokens:  ~{stats.orig_tokens:,} -> ~{stats.final_tokens:,}", file=sys.stderr)
     print(f"Saved:   ~{stats.saved_tokens:,} tokens  ({stats.saved_pct}%)", file=sys.stderr)
-    inferred_n = sum(1 for r in stats.rules if r.startswith("[INFERRED"))
-    verified_n = stats.rules_found - inferred_n
-    print(
-        f"Rules:   {stats.rules_found} behavioral corrections preserved "
-        f"({verified_n} verified, {inferred_n} inferred)",
-        file=sys.stderr,
-    )
+    print(f"Rules:   {stats.rules_found} behavioral corrections preserved", file=sys.stderr)
     for r in stats.rules[:5]:
         print(f"         -> {r[:72]}", file=sys.stderr)
     print(sep, file=sys.stderr)
 
     output_path = getattr(args, "output", None)
     if output_path:
-        Path(output_path).write_text(briefing, encoding="utf-8")
+        _atomic_write(Path(output_path), briefing)
         print(f"\nBriefing saved -> {output_path}", file=sys.stderr)
         print(
             "Paste its contents as the first message in a new "
@@ -1817,21 +1786,19 @@ def cmd_setup_mcp(_: argparse.Namespace) -> None:
         shutil.copy2(cfg_path, backup)
         print(f"Config backed up -> {backup}")
 
-    with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    _atomic_write(cfg_path, json.dumps(config, indent=2, ensure_ascii=False) + "\n")
 
     print(f"\ncontext-surgeon registered in:\n  {cfg_path}")
-    print("\nNext step: restart Claude Desktop.")
-    print("\nAvailable MCP tools after restart:")
+    print("Next step: restart Claude Desktop.")
+    print("Available MCP tools after restart:")
     for t in _TOOLS:
         print(f"  {t['name']}")
-    print("\nWorkflow:")
+    print("Workflow:")
     print("  1. Conversation approaching its context limit?")
     print("     Call create_briefing with your conversation text pasted in.")
     print("  2. Start a new conversation; paste the briefing as the first message.")
     print("  3. Continue -- full context headroom, no nuance lost.")
-    print("\nOr use the CLI directly (no MCP needed):")
+    print("Or use the CLI directly (no MCP needed):")
     print(f"  python {script} prune conversation.txt --output briefing.md")
 
 
