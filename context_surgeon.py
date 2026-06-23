@@ -912,6 +912,8 @@ def _load_rules_store() -> dict:
                         pass
                 # No valid backup — return empty to avoid corrupted data
                 return {"rules": [], "last_updated": None}
+        # Filter to string-only rules (FMECA)
+        data["rules"] = [r for r in data.get("rules", []) if isinstance(r, str)]
         # Emergency length warning for individual rules (FMECA)
         for rule in data.get("rules", []):
             if len(rule) > MAX_RULE_STORE_LEN:
