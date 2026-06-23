@@ -127,6 +127,7 @@ CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
+MAX_STORE_RULES_HARD_MAX = 50   # Absolute hard ceiling (FMECA defense-in-depth)
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
 MAX_RULE_STORE_LEN_SAVE = 1200  # Max rule length allowed to be saved (FMECA)
 MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
@@ -1113,6 +1114,12 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     if new_count - old_count > 20:
         import sys
         print(f"WARNING: Large rule increase detected ({old_count} → {new_count}). Save aborted for safety.", file=sys.stderr)
+        return final_rules, info_flags
+
+    # Hard maximum safeguard (FMECA)
+    if len(final_rules) > MAX_STORE_RULES_HARD_MAX:
+        import sys
+        print(f"CRITICAL ERROR: Rule count ({len(final_rules)}) exceeds hard maximum ({MAX_STORE_RULES_HARD_MAX}). Save aborted.", file=sys.stderr)
         return final_rules, info_flags
     _save_rules_store(store)
 
