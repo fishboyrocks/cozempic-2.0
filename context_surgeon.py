@@ -129,6 +129,7 @@ DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
 MAX_STORE_RULES_HARD_MAX = 50   # Absolute hard ceiling (FMECA defense-in-depth)
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
+AUDIT_LOG_PATH      = Path.home() / ".config" / "context-surgeon" / "audit.log"
 MAX_RULE_STORE_LEN_SAVE = 1200  # Max rule length allowed to be saved (FMECA)
 MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
@@ -888,12 +889,21 @@ def _bigrams(text: str) -> set[str]:
 
 
 def _log_store_change(action: str, count: int, max_count: int):
-    """Simple audit logging for rule store changes (FMECA)."""
+    """Write audit log to both stderr and persistent file (FMECA F12)."""
     ts = _dt.datetime.now().isoformat()
     msg = f"[{ts}] STORE {action}: {count}/{max_count} rules"
+    
+    # Always print to stderr
     import sys
     print(msg, file=sys.stderr)
-
+    
+    # Also append to audit log file
+    try:
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as logf:
+            logf.write(msg + "\n")
+    except Exception:
+        pass  # Audit logging failure should not break core functionality
 def _load_rules_store() -> dict:
     """Load the persistent rules store with SHA-256 checksum verification (FMECA F02)."""
     if not RULES_STORE_PATH.exists():
