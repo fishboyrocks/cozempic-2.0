@@ -1381,6 +1381,16 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
       4. Most recent N turns verbatim
     """
     rules, _ = extract_rules_with_store(turns, use_store=True)
+
+    # Capacity warning for create_briefing (FMECA F11)
+    from context_surgeon import MAX_STORE_RULES
+    capacity_warning = ""
+    if len(rules) >= int(MAX_STORE_RULES * 0.8):
+        if len(rules) >= MAX_STORE_RULES:
+            capacity_warning = f"\n\n**WARNING:** Rule store is FULL ({len(rules)}/{MAX_STORE_RULES}). New rules will be dropped.\n"
+        else:
+            capacity_warning = f"\n\n**WARNING:** Rule store is approaching capacity ({len(rules)}/{MAX_STORE_RULES}). Consider reviewing rules.\n"
+
     pruned, stats = prune(turns, verbatim, "aggressive")
     ts       = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1391,6 +1401,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         f"*Original: {stats.orig_turns} turns, ~{stats.orig_tokens:,} tokens*",
         f"*Compressed: {stats.final_turns} turns, ~{stats.final_tokens:,} tokens*",
         f"*Saved: {stats.saved_pct}% | Last {verbatim} turns verbatim*",
+        capacity_warning,
         "",
         "> **How to use**: Paste this entire document as your first message in a new",
         "> Claude Desktop conversation. It carries forward your behavioral corrections,",
