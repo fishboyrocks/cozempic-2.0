@@ -1092,6 +1092,11 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
         import sys
         print(f"ERROR: Rule exceeds save length limit ({MAX_RULE_STORE_LEN_SAVE} chars). Aborting save.", file=sys.stderr)
         return final_rules, info_flags
+
+    # Skip save if no changes (FMECA)
+    old_rules = store.get("rules", [])
+    if final_rules == old_rules:
+        return final_rules, info_flags
     _save_rules_store(store)
 
     return final_rules, info_flags
