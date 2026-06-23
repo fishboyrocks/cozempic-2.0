@@ -1666,6 +1666,15 @@ def _call_tool(name: str, args: dict) -> str:
             out.append("Near-duplicate candidates (informational only):")
             for flag in info_flags[:3]:
                 out.append(f"  - {flag['new_rule']}")
+
+        # Capacity warning (FMECA)
+        from context_surgeon import MAX_STORE_RULES
+        if len(rules) >= int(MAX_STORE_RULES * 0.8):
+            out.append("")
+            if len(rules) >= MAX_STORE_RULES:
+                out.append(f"WARNING: Rule store is FULL ({len(rules)}/{MAX_STORE_RULES}). New rules will be dropped.")
+            else:
+                out.append(f"WARNING: Rule store is approaching capacity ({len(rules)}/{MAX_STORE_RULES}).")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
