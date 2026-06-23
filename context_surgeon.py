@@ -999,6 +999,13 @@ def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict
         if not key:
             continue
         if key in existing:
+            # Track blocked duplicate for feedback (F10)
+            info_flags.append({
+                "blocked": True,
+                "reason": "exact_duplicate",
+                "rule": key[:80]
+            })
+            continue
             continue
 
         # Exact match first
