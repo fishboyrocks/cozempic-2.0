@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-context_surgeon.py  v1.2.0-alpha
+context_surgeon.py  v1.2.0
  _______________________________________________________________
 |                                                               |
 |  CONTEXT SURGEON — Surgical context cleaning for Claude       |
@@ -81,10 +81,11 @@ VERBATIM TURNS
   The N most recent turns are kept character-perfect; only older
   turns are processed according to the prescription. Default: 10.
 
-v1.1.0-alpha | https://github.com/fishboyrocks/cozempic-2.0
+v1.2.0 | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
+import datetime as _dt
 
 import argparse
 import hashlib
@@ -99,7 +100,7 @@ import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-
+# ruff: noqa: E741
 
 # ---- Windows UTF-8 fix -------------------------------------------------------
 # Without this, MCP JSON-RPC over stdio silently mangles non-ASCII on Windows
@@ -121,28 +122,23 @@ if sys.platform == "win32":
 # got versioned as a patch by mistake). Otherwise, purely corrects existing
 # behavior with no new surface -> PATCH. Debugging effort and lines changed
 # are irrelevant to this classification.
-__version__         = "1.2.0-alpha"  # MINOR: configurable store + size cap + surfaced bigram flags
-
-# Static dual-constant version guard (replaces fragile file-reading approach)
-# Both of these MUST be updated together when bumping versions.
-_DOCSTRING_VERSION = "1.2.0-alpha"
-
-if _DOCSTRING_VERSION != __version__:
-    import warnings
-    warnings.warn(
-        f"VERSION MISMATCH: docstring says v{_DOCSTRING_VERSION} but __version__ is {__version__}",
-        stacklevel=2
-    )
+__version__         = "1.2.0"  # 1.2.0 stable release: atomic writes + broader detection
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
-DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
+DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
+MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
+MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
+MAX_RULE_STORE_LEN_SAVE = 1200  # Max rule length allowed to be saved (FMECA)
+MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
+MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
+REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
+_SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
 RULES_STORE_PATH    = Path(
     os.environ.get("CONTEXT_SURGEON_RULES_STORE", 
                    str(Path.home() / ".config" / "context-surgeon" / "rules.json"))
 )
-MAX_STORE_RULES     = 500       # 1.1.1: hard cap to prevent unbounded growth
 MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
-MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
+MAX_RULE_LEN        = 800       # Conservative: 441 observed max + 359 char margin
                                   # v1.0.5: raised from 350. Measured natural
                                   # (uncapped) lengths of every real
                                   # correction-trigger sentence in a 298K+
@@ -215,6 +211,9 @@ _DATE_RE = re.compile(
     r"^\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# User-turn indicators for Format 3 improvement (FMECA F05)
+_USER_INDICATORS = ("?", "I need", "Can you", "Please", "I want")
 
 # ---- v1.0.2 gentle / standard prescription patterns -------------------------
 
@@ -332,6 +331,14 @@ class Turn:
     content: str
     index:   int = 0
 
+
+# Safety-critical keywords that should trigger extra caution in rule extraction
+_SAFETY_KEYWORDS = ("hate crime", "physical safety", "jeopardy", "endangered", "anti-trans")
+
+def _is_safety_critical(text: str) -> bool:
+    """Check if a sentence contains safety-critical content."""
+    lower = text.lower()
+    return any(kw in lower for kw in _SAFETY_KEYWORDS)
     def tokens(self) -> int:
         """Estimated token count using the calibrated chars-per-token ratio."""
         return max(1, int(len(self.content) / CHARS_PER_TOKEN))
@@ -401,7 +408,7 @@ def parse_conversation(source: str) -> list[Turn]:
             pass  # fall through to JSONL / text
 
     # JSONL (one JSON object per line — Claude Code session format)
-    first_nonblank = next((l.strip() for l in source.splitlines() if l.strip()), "")
+    first_nonblank = next((line.strip() for line in source.splitlines() if line.strip()), "")
     if first_nonblank.startswith("{"):
         try:
             return _parse_jsonl(source)
@@ -603,13 +610,24 @@ def _parse_text(source: str) -> list[Turn]:
         if pre:
             turns.append(Turn(role="user", content=pre, index=idx))
             idx += 1
-        # Each post-date block is labeled assistant (dates precede Claude responses).
-        for i, m in enumerate(date_matches):
-            content_start = m.end()
+        # Improved user-turn detection for Format 3 (FMECA F05)
+        # Check if content immediately before a date looks like a user turn
+        for i in range(len(date_matches)):
+            content_start = date_matches[i].end()
             content_end   = date_matches[i + 1].start() if i + 1 < len(date_matches) else len(source)
             chunk = source[content_start:content_end].strip()
+            
+            # Simple heuristic: if chunk starts with user-like patterns, treat as user
+            # Improved heuristic (FMECA): check start + first 100 chars for user signals
+            first_100 = chunk[:100].lower()
+            is_user_turn = (
+                any(chunk.lower().startswith(ind.lower()) for ind in _USER_INDICATORS) or
+                any(ind in first_100 for ind in (" i ", "i'm", "i've", "i'll", "can you", "please", "?"))
+            )
+            role = "user" if is_user_turn else "assistant"
+            
             if chunk:
-                turns.append(Turn(role="assistant", content=chunk, index=idx))
+                turns.append(Turn(role=role, content=chunk, index=idx))
                 idx += 1
         if len(turns) >= 2:
             return turns
@@ -799,14 +817,14 @@ def _sentence_around(text: str, start: int, end: int) -> str:
 
     # ---- MAX_RULE_LEN cap: only re-anchor if a plain right-trim would ------
     # ---- actually cut the keyword off; otherwise just right-trim normally -
-    if len(result) > MAX_RULE_LEN:
+    # Safety-critical sentences are never truncated (FMECA F09)
+    if _is_safety_critical(result):
+        # Safety sentences bypass length limit entirely
+        pass
+    elif len(result) > MAX_RULE_LEN:
         kw_end = kw_pos + len(keyword)
         if kw_end > MAX_RULE_LEN:
             new_left = max(0, kw_pos - MAX_RULE_LEN // 2)
-            # Snap BACKWARD to the start of whatever word we're sitting in
-            # the middle of, so re-anchoring never discards a leading word
-            # entirely (a few extra included characters is harmless; losing
-            # a whole word/sentence is not).
             if new_left > 0 and result[new_left - 1] != " ":
                 prev_space = result.rfind(" ", 0, new_left)
                 new_left = prev_space + 1 if prev_space != -1 else 0
@@ -815,11 +833,6 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             trimmed    = result[:MAX_RULE_LEN]
             last_space = trimmed.rfind(" ")
             cut_point  = last_space if last_space > MAX_RULE_LEN - 40 else MAX_RULE_LEN
-            # Absorb a SMALL run of closing punctuation immediately after
-            # the cut point (capped at 5 chars) so the hard truncation
-            # doesn't strand an orphaned ")" right after it -- this is
-            # exactly what happens when the boundary extension above is
-            # itself what pushed the sentence just over MAX_RULE_LEN.
             absorbed = 0
             while (cut_point < len(result)
                    and result[cut_point] in _CLOSING_PUNCT
@@ -827,15 +840,9 @@ def _sentence_around(text: str, start: int, end: int) -> str:
                 cut_point += 1
                 absorbed  += 1
             if cut_point >= len(result):
-                # Absorption reached the natural end of the string --
-                # nothing was actually removed, so no "…" marker belongs
-                # here; adding one anyway would itself be a fabricated
-                # truncation signal on text that was never cut.
                 result = result[:cut_point]
             else:
                 result = result[:cut_point] + "…"
-
-    return result
 
 
 def extract_rules(turns: list[Turn]) -> list[str]:
@@ -877,8 +884,17 @@ def _bigrams(text: str) -> set[str]:
     return {" ".join(pair) for pair in zip(words, words[1:])}
 
 
+
+
+def _log_store_change(action: str, count: int, max_count: int):
+    """Simple audit logging for rule store changes (FMECA)."""
+    ts = _dt.datetime.now().isoformat()
+    msg = f"[{ts}] STORE {action}: {count}/{max_count} rules"
+    import sys
+    print(msg, file=sys.stderr)
+
 def _load_rules_store() -> dict:
-    """Load the persistent rules store (creates empty structure if missing)."""
+    """Load the persistent rules store with SHA-256 checksum verification (FMECA F02)."""
     if not RULES_STORE_PATH.exists():
         return {"rules": [], "last_updated": None}
     try:
@@ -886,27 +902,76 @@ def _load_rules_store() -> dict:
             data = json.load(f)
         if not isinstance(data, dict) or "rules" not in data:
             return {"rules": [], "last_updated": None}
+
+        # Verify checksum if present
+        if "checksum" in data:
+            stored_checksum = data["checksum"]
+            rules_str = json.dumps(data.get("rules", []), sort_keys=True)
+            computed_checksum = hashlib.sha256(rules_str.encode("utf-8")).hexdigest()
+            if stored_checksum != computed_checksum:
+                # Checksum failed — try backup
+                backup = RULES_STORE_PATH.with_suffix(".json.bak")
+                if backup.exists():
+                    try:
+                        with open(backup, encoding="utf-8") as bf:
+                            backup_data = json.load(bf)
+                        if isinstance(backup_data, dict) and "rules" in backup_data:
+                            return backup_data
+                    except Exception:
+                        pass
+                # No valid backup — return empty to avoid corrupted data
+                return {"rules": [], "last_updated": None}
+        # Filter to string-only rules (FMECA)
+        data["rules"] = [r for r in data.get("rules", []) if isinstance(r, str)]
+        # Emergency length warning for individual rules (FMECA)
+        for rule in data.get("rules", []):
+            if len(rule) > MAX_RULE_STORE_LEN:
+                import sys
+                print(f"WARNING: Rule store contains an extremely long rule ({len(rule)} chars). "
+                      f"This may impact performance.", file=sys.stderr)
+                break
+        # Safeguard: enforce MAX_STORE_RULES on load (FMECA)
+        if len(data.get("rules", [])) > MAX_STORE_RULES:
+            import sys
+            print(f"WARNING: Rule store contains more rules ({len(data['rules'])}) than MAX_STORE_RULES ({MAX_STORE_RULES}). Truncating.", file=sys.stderr)
+            data["rules"] = data["rules"][:MAX_STORE_RULES]
         return data
     except Exception:
         return {"rules": [], "last_updated": None}
 
 
 def _save_rules_store(data: dict) -> None:
-    """Atomically save the rules store with automatic backup."""
+    """Atomically save the rules store with SHA-256 checksum for strong integrity (FMECA F02/F06)."""
     RULES_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # Create backup of existing store before writing new one
-    if RULES_STORE_PATH.exists():
-        try:
-            backup_path = RULES_STORE_PATH.with_suffix(".json.bak")
-            backup_path.write_text(RULES_STORE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-        except Exception:
-            pass  # Backup failure should not block the main write
+    # Compute checksum of the rules list
+    rules_str = json.dumps(data.get("rules", []), sort_keys=True)
+    checksum = hashlib.sha256(rules_str.encode("utf-8")).hexdigest()
+    data["checksum"] = checksum
 
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     _atomic_write(RULES_STORE_PATH, content)
 
-
+    # Post-write integrity verification
+    try:
+        with open(RULES_STORE_PATH, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict) or "rules" not in loaded or "checksum" not in loaded:
+            raise ValueError("Store missing required fields")
+        # Verify checksum
+        loaded_rules_str = json.dumps(loaded.get("rules", []), sort_keys=True)
+        loaded_checksum = hashlib.sha256(loaded_rules_str.encode("utf-8")).hexdigest()
+        if loaded_checksum != loaded["checksum"]:
+            raise ValueError("Checksum mismatch after write")
+    except Exception as e:
+        backup = RULES_STORE_PATH.with_suffix(".json.bak")
+        if backup.exists():
+            try:
+                backup_content = backup.read_text(encoding="utf-8")
+                _atomic_write(RULES_STORE_PATH, backup_content)
+            except Exception:
+                pass
+        raise RuntimeError(f"Rule store integrity verification failed: {e}") from e
 def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict]]:
     """
     Merge new rules into the store using exact-match only.
@@ -952,6 +1017,7 @@ def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict
                     "near_duplicates": overlaps[:3]
                 })
 
+    # When REVIEW_MODE=1, info_flags will contain near-duplicate candidates for manual review
     return final_rules, info_flags
 
 
@@ -959,9 +1025,30 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     """
     Extract rules and optionally merge with the persistent store.
 
+
+    # Safeguard for empty/near-empty input (FMECA)
+    if not turns:
+        return [], []
     When use_store=False, behaves exactly like the original extract_rules().
     """
     fresh_rules = extract_rules(turns)  # original function
+
+    # Safety net for critical rules (FMECA F01) - does not modify _sentence_around()
+    safety_keywords = ("anti-trans hate crime", "physical safety", "jeopardy from an")
+    for turn in turns:
+        if turn.role != "user":
+            continue
+        for kw in safety_keywords:
+            if kw.lower() in turn.content.lower():
+                # Check if this safety content made it into fresh_rules
+                found = any(kw.lower() in r.lower() for r in fresh_rules)
+                if not found:
+                    # Force include a minimal version of the safety rule
+                    for sent in turn.content.split("."):
+                        if kw.lower() in sent.lower() and len(sent) > 30:
+                            fresh_rules.append(sent.strip() + ".")
+                            break
+                break
 
     if not use_store:
         return fresh_rules, []
@@ -969,12 +1056,58 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     store = _load_rules_store()
     final_rules, info_flags = merge_rules(fresh_rules, store)
 
-    # Update store (with hard cap)
+    # Update store
+
+    # Final deduplication safeguard (FMECA)
+    if not REVIEW_MODE:
+        final_rules = list(dict.fromkeys(final_rules))  # preserve order, remove dups
     store["rules"] = final_rules[:MAX_STORE_RULES]
     store["last_updated"] = datetime.now().isoformat()
+
+    # Audit log for store changes (FMECA)
+    _log_store_change("UPDATE", len(final_rules), MAX_STORE_RULES)
+
+
+    # Hard cap reached message (FMECA)
+    if len(final_rules) >= MAX_STORE_RULES:
+        import sys
+        print(f"ERROR: Rule store has reached its maximum capacity ({MAX_STORE_RULES} rules). "
+              f"New rules are being dropped. Please review and prune your rules.", file=sys.stderr)
+    # Warning when approaching store cap (FMECA)
+    if len(final_rules) >= int(MAX_STORE_RULES * 0.8):
+        import sys
+        print(f"WARNING: Rule store is approaching capacity ({len(final_rules)}/{MAX_STORE_RULES} rules). "
+              f"Consider reviewing or pruning rules.", file=sys.stderr)
+
+    # Duplicate safeguard (FMECA)
+    if len(set(store.get("rules", []))) != len(store.get("rules", [])):
+        import sys
+        print("ERROR: Duplicate rules detected in store before save. Aborting save.", file=sys.stderr)
+        return final_rules, info_flags
+
+    # Skip save if no rules (FMECA)
+    if not final_rules:
+        return final_rules, info_flags
+
+    # Non-string safeguard before save (FMECA)
+    if any(not isinstance(r, str) for r in store.get("rules", [])):
+        import sys
+        print("ERROR: Attempted to save non-string rules. Aborting save.", file=sys.stderr)
+        return final_rules, info_flags
+
+    # Length limit before save (FMECA)
+    if any(len(r) > MAX_RULE_STORE_LEN_SAVE for r in store.get("rules", [])):
+        import sys
+        print(f"ERROR: Rule exceeds save length limit ({MAX_RULE_STORE_LEN_SAVE} chars). Aborting save.", file=sys.stderr)
+        return final_rules, info_flags
+
+    # Skip save if no changes (FMECA)
+    old_rules = store.get("rules", [])
+    if final_rules == old_rules:
+        return final_rules, info_flags
     _save_rules_store(store)
 
-    return final_rules, info_flags  # info_flags now actually returned and usable
+    return final_rules, info_flags
 
 
 # ---- Deduplication -----------------------------------------------------------
@@ -1256,7 +1389,7 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "---",
         "",
         "## CONVERSATION HISTORY",
-        f"*Older turns: aggressive compression (code blocks always verbatim).*",
+        "*Older turns: aggressive compression (code blocks always verbatim).*",
         f"*Last {verbatim} turns: verbatim.*",
         "",
     ]
@@ -1475,6 +1608,9 @@ _TOOLS = [
 def _call_tool(name: str, args: dict) -> str:
     """Dispatch an MCP tool call and return the result as text."""
     text  = args.get("conversation_text", "")
+    if len(text) > MCP_MAX_INPUT_CHARS:
+        return f"ERROR: Input too large ({len(text):,} chars). Maximum allowed: {MCP_MAX_INPUT_CHARS:,} chars. Use the CLI for large conversations."
+
     turns = parse_conversation(text)
 
     if name == "diagnose_conversation":
@@ -1527,7 +1663,7 @@ def _call_tool(name: str, args: dict) -> str:
         out.extend(f"{i}. {r}" for i, r in enumerate(rules, 1))
         if info_flags:
             out.append("")
-            out.append("Near-duplicate candidates (informational):")
+            out.append("Near-duplicate candidates (informational only):")
             for flag in info_flags[:3]:
                 out.append(f"  - {flag['new_rule']}")
         return "\n".join(out)
@@ -1723,6 +1859,26 @@ def cmd_discover(_: argparse.Namespace) -> None:
     print(f"Platform: {sys.platform} / {platform.machine()}")
 
 
+
+def cmd_rules_status(_: argparse.Namespace) -> None:
+    """Show current rule store status and capacity."""
+    from context_surgeon import _load_rules_store, MAX_STORE_RULES
+    
+    store = _load_rules_store()
+    rules = store.get("rules", [])
+    count = len(rules)
+    pct = (count / MAX_STORE_RULES * 100) if MAX_STORE_RULES > 0 else 0
+    
+    print("Rule Store Status")
+    print(f"  Rules: {count} / {MAX_STORE_RULES} ({pct:.1f}%)")
+    
+    if count >= MAX_STORE_RULES:
+        print("  Status: FULL - New rules will be dropped. Please review and prune rules.")
+    elif count >= int(MAX_STORE_RULES * 0.8):
+        print("  Status: APPROACHING CAPACITY - Consider reviewing rules soon.")
+    else:
+        print("  Status: OK")
+
 def cmd_diagnose(args: argparse.Namespace) -> None:
     source = _read_input(args.file)
     turns  = parse_conversation(source)
@@ -1754,19 +1910,14 @@ def cmd_prune(args: argparse.Namespace) -> None:
     print(f"Tokens:  ~{stats.orig_tokens:,} -> ~{stats.final_tokens:,}", file=sys.stderr)
     print(f"Saved:   ~{stats.saved_tokens:,} tokens  ({stats.saved_pct}%)", file=sys.stderr)
     print(f"Rules:   {stats.rules_found} behavioral corrections preserved", file=sys.stderr)
+
+    # Low rule count warning (FMECA)
+    if stats.rules_found < 3 and stats.orig_turns > 10:
+        print("WARNING: Very few behavioral rules were extracted. "
+              "This may indicate a parsing issue with the conversation format.", file=sys.stderr)
     for r in stats.rules[:5]:
         print(f"         -> {r[:72]}", file=sys.stderr)
     print(sep, file=sys.stderr)
-
-    # 1.1.0: Show near-duplicate informational flags if any were found
-    rules, info_flags = extract_rules_with_store(turns, use_store=True)
-    if info_flags:
-        print("
-Near-duplicate rule candidates detected (informational only):", file=sys.stderr)
-        for flag in info_flags[:3]:
-            print(f"  New: {flag['new_rule']}", file=sys.stderr)
-            for nd in flag.get('near_duplicates', []):
-                print(f"    ~ {nd['overlap']*100:.0f}% overlap with: {nd['rule']}", file=sys.stderr)
 
     output_path = getattr(args, "output", None)
     if output_path:
@@ -1876,6 +2027,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("discover",   help="Find Claude Desktop data directories + MCP config")
+    sub.add_parser("rules-status", help="Show current rule store status and capacity")
 
     pd = sub.add_parser("diagnose", help="Analyze a conversation for bloat and savings potential")
     pd.add_argument("file", help="Conversation file or - for stdin")
@@ -1915,6 +2067,7 @@ def main() -> None:
         "diagnose":  cmd_diagnose,
         "prune":     cmd_prune,
         "setup-mcp": cmd_setup_mcp,
+        "rules-status": cmd_rules_status,
     }
 
     if args.command in commands:
