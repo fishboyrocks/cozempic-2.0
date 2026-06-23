@@ -128,6 +128,7 @@ DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varie
 DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
+MAX_RULE_STORE_LEN_SAVE = 1200  # Max rule length allowed to be saved (FMECA)
 MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
 REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
@@ -1084,6 +1085,12 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     if any(not isinstance(r, str) for r in store.get("rules", [])):
         import sys
         print("ERROR: Attempted to save non-string rules. Aborting save.", file=sys.stderr)
+        return final_rules, info_flags
+
+    # Length limit before save (FMECA)
+    if any(len(r) > MAX_RULE_STORE_LEN_SAVE for r in store.get("rules", [])):
+        import sys
+        print(f"ERROR: Rule exceeds save length limit ({MAX_RULE_STORE_LEN_SAVE} chars). Aborting save.", file=sys.stderr)
         return final_rules, info_flags
     _save_rules_store(store)
 
