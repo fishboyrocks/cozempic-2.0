@@ -85,6 +85,7 @@ v1.0.7-alpha | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
+import datetime as _dt
 
 import argparse
 import hashlib
@@ -127,6 +128,7 @@ DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varie
 DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
+MIN_RULE_LEN        = 10      # Minimum meaningful rule length (filters noise)
 MCP_MAX_INPUT_CHARS = 2_000_000   # ~2MB safety limit for MCP tool calls
 REVIEW_MODE = os.environ.get("CONTEXT_SURGEON_REVIEW_MODE", "0") == "1"
 _SAFETY_PATTERNS = ("anti-trans hate crime", "physical safety", "jeopardy from an")
@@ -397,7 +399,7 @@ def parse_conversation(source: str) -> list[Turn]:
             pass  # fall through to JSONL / text
 
     # JSONL (one JSON object per line — Claude Code session format)
-    first_nonblank = next((l.strip() for l in source.splitlines() if l.strip()), "")
+    first_nonblank = next((line.strip() for line in source.splitlines() if line.strip()), "")
     if first_nonblank.startswith("{"):
         try:
             return _parse_jsonl(source)
@@ -874,7 +876,6 @@ def _bigrams(text: str) -> set[str]:
 
 
 
-import datetime as _dt
 
 def _log_store_change(action: str, count: int, max_count: int):
     """Simple audit logging for rule store changes (FMECA)."""
@@ -1013,6 +1014,10 @@ def extract_rules_with_store(turns: list[Turn], use_store: bool = True) -> tuple
     """
     Extract rules and optionally merge with the persistent store.
 
+
+    # Safeguard for empty/near-empty input (FMECA)
+    if not turns:
+        return [], []
     When use_store=False, behaves exactly like the original extract_rules().
     """
     fresh_rules = extract_rules(turns)  # original function
