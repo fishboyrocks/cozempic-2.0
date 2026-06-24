@@ -1417,6 +1417,20 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "",
     ]
 
+
+    # Blocked rules section (F10)
+    blocked = [f for f in info_flags if f.get("blocked")]
+    if blocked:
+        lines.append("## BLOCKED RULES")
+        lines.append("*The following rules were blocked from being saved:*")
+        lines.append("")
+        for b in blocked[:10]:
+            reason = b.get('reason', 'unknown')
+            rule = b.get('rule', '')
+            lines.append(f"- **{reason}**: {rule}")
+        if len(blocked) > 10:
+            lines.append(f"- ... and {len(blocked)-10} more")
+        lines.append("")
     if rules:
         lines += [
             "---",
@@ -1730,6 +1744,16 @@ def _call_tool(name: str, args: dict) -> str:
                 out.append(f"WARNING: Rule store is FULL ({len(rules)}/{MAX_STORE_RULES}). New rules will be dropped.")
             else:
                 out.append(f"WARNING: Rule store is approaching capacity ({len(rules)}/{MAX_STORE_RULES}).")
+
+        # Blocked rules feedback (F10)
+        blocked = [f for f in info_flags if f.get("blocked")]
+        if blocked:
+            out.append("")
+            out.append(f"Blocked rules ({len(blocked)}):")
+            for b in blocked[:5]:
+                out.append(f"  - {b.get('reason', 'unknown')}: {b.get('rule', '')[:60]}")
+            if len(blocked) > 5:
+                out.append(f"  ... and {len(blocked)-5} more")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
