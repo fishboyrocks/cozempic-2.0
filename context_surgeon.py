@@ -1964,6 +1964,16 @@ def cmd_prune(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     briefing = create_briefing(turns, args.verbatim)
+
+    # Display blocked rules feedback (F10)
+    rules, info_flags = extract_rules_with_store(turns, use_store=True)
+    blocked = [f for f in info_flags if f.get("blocked")]
+    if blocked:
+        print(f"\nBlocked rules ({len(blocked)}):", file=sys.stderr)
+        for b in blocked[:5]:
+            print(f"  - {b.get('reason', 'unknown')}: {b.get('rule', '')[:60]}", file=sys.stderr)
+        if len(blocked) > 5:
+            print(f"  ... and {len(blocked)-5} more", file=sys.stderr)
     _, stats  = prune(turns, args.verbatim, args.rx)
 
     sep = "-" * 56
