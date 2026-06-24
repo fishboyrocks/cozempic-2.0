@@ -1418,6 +1418,9 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
     ]
 
 
+    # Initialize info_flags if not already defined (F10)
+    if 'info_flags' not in dir():
+        info_flags = []
     # Blocked rules section (F10)
     blocked = [f for f in info_flags if f.get("blocked")]
     if blocked:
