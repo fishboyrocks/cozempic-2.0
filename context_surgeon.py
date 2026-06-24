@@ -125,7 +125,7 @@ if sys.platform == "win32":
 __version__         = "1.2.0"  # 1.2.0 stable release: atomic writes + broader detection
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
-DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
+DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "7"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
 MAX_STORE_RULES_HARD_MAX = 50   # Absolute hard ceiling (FMECA defense-in-depth)
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
