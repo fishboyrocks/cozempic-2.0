@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.9-alpha] - 2026-06-23
+
+_Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.9 once confirmed. This entry was originally omitted entirely -- the code, tag, and GitHub Release for v1.0.9-alpha were pushed without a corresponding changelog entry on 2026-06-23, caught by the user, not by any verification step. Full account of the failure and the guardrail added in response is in this commit's message and the v1.0.9-alpha GitHub Release notes._
+
+### Fixed
+
+- Generalize Show-toggle detection to also match "Show less" (Claude Desktop's same truncation toggle once a long message has been expanded), not just "Show more". v1.0.8 found 10 inferred turns in a capture where long messages were left collapsed, but zero in a capture where the user had expanded every long message before copying; not a different artifact, the other half of the same toggle ([`654d691`])
+- Fix a bug found while making the above change: the boundary computation used a hardcoded `"Show more"` substring search that would have silently broken for every "Show less" match, corrupting every position computed from it; replaced with a derivation from the match span itself ([`654d691`])
+- Generalize `strip_ui_artifacts()` to also strip standalone "Show less" lines ([`654d691`])
+
 ## [1.0.8-alpha] - 2026-06-19
 
 _Pre-release; not yet verified against the user's actual `conversation.txt`. Promote to 1.0.8 once confirmed._
@@ -92,6 +102,7 @@ _Initial release._
 - Add `context_surgeon.py`: CLI (`discover`, `diagnose`, `prune`, `setup-mcp`) and stdio MCP server (`diagnose_conversation`, `prune_conversation`, `create_briefing`, `extract_rules`) for pruning Claude Desktop conversation exports ([`8add84a`])
 
 [a8106c2]: https://github.com/fishboyrocks/cozempic-2.0/commit/a8106c26d24657ea4e443181dcbb0c56d0ad6dc6
+[654d691]: https://github.com/fishboyrocks/cozempic-2.0/commit/654d691b7ae40d7cd539eae2d750ae5af0b0117f
 [2726c8a]: https://github.com/fishboyrocks/cozempic-2.0/commit/2726c8a1a64ba8576da389d0960dfc041ef7ab2f
 [6e50171]: https://github.com/fishboyrocks/cozempic-2.0/commit/6e501719865f8aade3cd433c8f7c0e0e7596a620
 [4d4b6d2]: https://github.com/fishboyrocks/cozempic-2.0/commit/4d4b6d208ef33e8caac4fdccbf736b06c7ffbb45
@@ -102,6 +113,7 @@ _Initial release._
 [aac5002]: https://github.com/fishboyrocks/cozempic-2.0/commit/aac5002f12c160b20db0159998955f8b736b58c9
 [8add84a]: https://github.com/fishboyrocks/cozempic-2.0/commit/8add84a3ff9e01a56c2178029ed97a74dff43487
 
+[1.0.9-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.9-alpha
 [1.0.8-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.8-alpha
 [1.0.7-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.7-alpha
 [1.0.6-alpha]: https://github.com/fishboyrocks/cozempic-2.0/releases/tag/v1.0.6-alpha
