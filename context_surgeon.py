@@ -124,7 +124,15 @@ __version__         = "1.0.9-alpha"
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
 DEFAULT_VERBATIM    = 10        # recent turns kept verbatim by default
-MAX_RULES           = 20        # IFScale: >30 irrelevant rules measurably degrades adherence
+MAX_RULES           = 20        # Grounded in IFScale (arxiv.org/abs/2507.11538), Table 1,
+                                  # claude-sonnet-4: 100% @10 rules, 98% @50, 94.4% @100,
+                                  # dropping to 77.2% @250, 42.9% @500. Omission (silent
+                                  # drop, not active contradiction) is the dominant failure
+                                  # mode at high density -- the exact risk for a safety-
+                                  # critical rule. 20 sits inside the near-100% zone with
+                                  # margin. Previous comment cited an unverifiable ">30"
+                                  # threshold not present in the actual paper or its
+                                  # published leaderboard data; corrected 2026-06-23.
 MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # v1.0.5: raised from 350. Measured natural
                                   # (uncapped) lengths of every real
