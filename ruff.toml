@@ -1,0 +1,32 @@
+# ruff.toml -- linter configuration for context_surgeon.py
+#
+# Rule selection is a deliberate, narrow correctness-and-bug-pattern subset,
+# not Ruff's full rule set. A broad `--select ALL` run against this file
+# found 193 findings, the overwhelming majority of which were line-length
+# (E501) and mandatory-docstring (D) style preferences unrelated to
+# correctness -- noise that would drown out real signal and, if auto-fixed
+# in bulk, would violate this project's one-micro-change-at-a-time safety
+# protocol by touching far more than 5-10 lines at once.
+#
+# This file exists so the exact rule selection is a versioned, reviewable
+# artifact rather than something re-typed (and potentially drifting) on
+# each invocation. Checked on every micro-change to context_surgeon.py, as
+# a detection step between py_compile and the real-data functional test --
+# never with --fix applied in bulk; findings on lines already being
+# touched get fixed as part of that same micro-change, findings elsewhere
+# become their own separate, later micro-changes.
+
+target-version = "py310"
+
+[lint]
+select = [
+    "F",        # Pyflakes: undefined names, unused imports/variables -- real correctness bugs
+    "E9",       # Pycodestyle errors: syntax-adjacent issues (overlaps py_compile; harmless to keep)
+    "B",        # flake8-bugbear: common real-world bug patterns
+    "PLW2901",  # loop variable overwritten by its own assignment target
+    "PLR2004",  # magic value used in a comparison (named-constant hygiene)
+    "PLR0911",  # too many return statements -- flags exactly the kind of
+    "PLR0912",  # too many branches                 -- accumulated complexity
+    "PLR0915",  # too many statements                -- this project has seen
+                # repeatedly cause subtle bugs in _sentence_around specifically
+]
