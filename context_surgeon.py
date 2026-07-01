@@ -146,6 +146,33 @@ MAX_RULE_LEN        = 460       # max chars per extracted rule sentence
                                   # 460 covers it with margin without being
                                   # an arbitrary guess.
 
+
+def _read_int_env(var_name: str, default: int) -> int:
+    """
+    Read an integer configuration value from an environment variable,
+    falling back to `default` if the variable is unset, empty, or not a
+    valid integer. Never raises -- a malformed env var degrades to the
+    safe default rather than crashing the tool.
+
+    v1.1.0 (in progress): first step toward making constants like
+    MAX_RULES configurable via environment variables, per the user's
+    FMECA-driven request. This function is intentionally standalone and
+    UNUSED by any existing constant as of this commit -- wiring it into
+    MAX_RULES, MAX_RULE_LEN, or anything else is a separate, later
+    micro-change, done only after this helper itself is proven correct
+    in isolation. Per the strict incremental-edit protocol in effect for
+    this file: one micro-change per commit, py_compile + real-data
+    functional test after every edit, no bundling.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
 # v1.0.6: closing punctuation that should never be stranded one character
 # behind a sentence-ending period -- "...else.) hence..." should keep the
 # ")". Includes straight AND curly/smart quotes (checked against the real
