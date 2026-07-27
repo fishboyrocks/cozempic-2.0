@@ -190,11 +190,11 @@ CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
 _COLON_RE = re.compile(
     r"^\s*"
     r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional leading [time]
-    r"(?:\*\*|__)? "                                    # optional **/__"
+    r"(?:\*\*|__)?\s*"                                 # optional **/__
     r"(You|User|Human|Assistant|Claude(?:\s+[A-Za-z0-9][A-Za-z0-9.]*){0,3}|AI)"
-    r"(?:\*\*|__)? "                                    # optional closing **/__"
-    r"\s*(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"    # optional trailing [time]
-    r":\s*",                                           # required colon
+    r"(?:\*\*|__)?\s*"                                 # optional closing **/__
+    r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional trailing [time]
+    r":\s*",                                          # required colon
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -333,17 +333,19 @@ class Turn:
     content: str
     index:   int = 0
 
+    def tokens(self) -> int:
+        """Estimated token count using the calibrated chars-per-token ratio."""
+        return max(1, int(len(self.content) / CHARS_PER_TOKEN))
+
 
 # Safety-critical keywords that should trigger extra caution in rule extraction
 _SAFETY_KEYWORDS = ("hate crime", "physical safety", "jeopardy", "endangered", "anti-trans")
+
 
 def _is_safety_critical(text: str) -> bool:
     """Check if a sentence contains safety-critical content."""
     lower = text.lower()
     return any(kw in lower for kw in _SAFETY_KEYWORDS)
-    def tokens(self) -> int:
-        """Estimated token count using the calibrated chars-per-token ratio."""
-        return max(1, int(len(self.content) / CHARS_PER_TOKEN))
 
 
 @dataclass
@@ -846,6 +848,8 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             else:
                 result = result[:cut_point] + "…"
 
+    return result
+
 
 def extract_rules(turns: list[Turn]) -> list[str]:
     """
@@ -1006,34 +1010,32 @@ def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict
                 "rule": key[:80]
             })
             continue
-            continue
 
-        # Exact match first
-        if key not in existing:
-            final_rules.append(key)
-            existing.add(key)
+        # New unique rule - add it
+        final_rules.append(key)
+        existing.add(key)
 
-            # Bigram overlap is calculated for informational purposes only
-            # (never used as a merge decision)
-            overlaps = []
-            for existing_rule in list(existing):
-                if existing_rule == key:
-                    continue
-                b1 = _bigrams(key)
-                b2 = _bigrams(existing_rule)
-                if b1 and b2:
-                    overlap = len(b1 & b2) / max(len(b1), len(b2))
-                    if overlap >= 0.5:
-                        overlaps.append({
-                            "rule": existing_rule[:80],
-                            "overlap": round(overlap, 2)
-                        })
+        # Bigram overlap is calculated for informational purposes only
+        # (never used as a merge decision)
+        overlaps = []
+        for existing_rule in list(existing):
+            if existing_rule == key:
+                continue
+            b1 = _bigrams(key)
+            b2 = _bigrams(existing_rule)
+            if b1 and b2:
+                overlap = len(b1 & b2) / max(len(b1), len(b2))
+                if overlap >= 0.5:
+                    overlaps.append({
+                        "rule": existing_rule[:80],
+                        "overlap": round(overlap, 2)
+                    })
 
-            if overlaps:
-                info_flags.append({
-                    "new_rule": key[:80],
-                    "near_duplicates": overlaps[:3]
-                })
+        if overlaps:
+            info_flags.append({
+                "new_rule": key[:80],
+                "near_duplicates": overlaps[:3]
+            })
 
     # When REVIEW_MODE=1, info_flags will contain near-duplicate candidates for manual review
     return final_rules, info_flags
