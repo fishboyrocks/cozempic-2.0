@@ -125,7 +125,7 @@ if sys.platform == "win32":
 __version__         = "1.2.0"  # 1.2.0 stable release: atomic writes + broader detection
 CHARS_PER_TOKEN     = 3.1       # calibrated from real Claude sessions (cozempic/tokens.py)
 DEFAULT_CONTEXT_WIN = 200_000   # conservative 200 K baseline; real window varies by plan/model
-DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "10"))
+DEFAULT_VERBATIM    = int(os.environ.get("CONTEXT_SURGEON_DEFAULT_VERBATIM", "7"))
 MAX_STORE_RULES     = int(os.environ.get("CONTEXT_SURGEON_MAX_STORE_RULES", "30"))
 MAX_STORE_RULES_HARD_MAX = 50   # Absolute hard ceiling (FMECA defense-in-depth)
 MAX_RULE_STORE_LEN  = 2000    # Emergency warning threshold for individual rule length
@@ -190,11 +190,11 @@ CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```|`[^`\n]+`")
 _COLON_RE = re.compile(
     r"^\s*"
     r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional leading [time]
-    r"(?:\*\*|__)? "                                    # optional **/__"
+    r"(?:\*\*|__)?\s*"                                 # optional **/__
     r"(You|User|Human|Assistant|Claude(?:\s+[A-Za-z0-9][A-Za-z0-9.]*){0,3}|AI)"
-    r"(?:\*\*|__)? "                                    # optional closing **/__"
-    r"\s*(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"    # optional trailing [time]
-    r":\s*",                                           # required colon
+    r"(?:\*\*|__)?\s*"                                 # optional closing **/__
+    r"(?:\[\d{1,2}:\d{2}(?:\s*[AP]M)?\])?\s*"       # optional trailing [time]
+    r":\s*",                                          # required colon
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -310,16 +310,16 @@ CORRECTION_RE = re.compile(
 # the exact same hardened _sentence_around() path.
 IMPLICIT_CORRECTION_RE = re.compile(
     r"\b(?:"
-    r"actually[,.]"
+    r"actually[,. ]"
     r"|that's not right"
     r"|that's incorrect"
     r"|no[, ]that's"
-    r"|wait[, ]no"
+    r"|wait,? no"
     r"|I meant"
     r"|I said"
-    r"|sorry[, ]but"
+    r"|sorry,? but"
     r"|actually[, ]I"
-    r")\b",
+    r")",
     re.IGNORECASE,
 )
 
@@ -333,17 +333,19 @@ class Turn:
     content: str
     index:   int = 0
 
+    def tokens(self) -> int:
+        """Estimated token count using the calibrated chars-per-token ratio."""
+        return max(1, int(len(self.content) / CHARS_PER_TOKEN))
+
 
 # Safety-critical keywords that should trigger extra caution in rule extraction
 _SAFETY_KEYWORDS = ("hate crime", "physical safety", "jeopardy", "endangered", "anti-trans")
+
 
 def _is_safety_critical(text: str) -> bool:
     """Check if a sentence contains safety-critical content."""
     lower = text.lower()
     return any(kw in lower for kw in _SAFETY_KEYWORDS)
-    def tokens(self) -> int:
-        """Estimated token count using the calibrated chars-per-token ratio."""
-        return max(1, int(len(self.content) / CHARS_PER_TOKEN))
 
 
 @dataclass
@@ -846,6 +848,8 @@ def _sentence_around(text: str, start: int, end: int) -> str:
             else:
                 result = result[:cut_point] + "…"
 
+    return result
+
 
 def extract_rules(turns: list[Turn]) -> list[str]:
     """
@@ -999,34 +1003,39 @@ def merge_rules(new_rules: list[str], store: dict) -> tuple[list[str], list[dict
         if not key:
             continue
         if key in existing:
+            # Track blocked duplicate for feedback (F10)
+            info_flags.append({
+                "blocked": True,
+                "reason": "exact_duplicate",
+                "rule": key[:80]
+            })
             continue
 
-        # Exact match first
-        if key not in existing:
-            final_rules.append(key)
-            existing.add(key)
+        # New unique rule - add it
+        final_rules.append(key)
+        existing.add(key)
 
-            # Bigram overlap is calculated for informational purposes only
-            # (never used as a merge decision)
-            overlaps = []
-            for existing_rule in list(existing):
-                if existing_rule == key:
-                    continue
-                b1 = _bigrams(key)
-                b2 = _bigrams(existing_rule)
-                if b1 and b2:
-                    overlap = len(b1 & b2) / max(len(b1), len(b2))
-                    if overlap >= 0.5:
-                        overlaps.append({
-                            "rule": existing_rule[:80],
-                            "overlap": round(overlap, 2)
-                        })
+        # Bigram overlap is calculated for informational purposes only
+        # (never used as a merge decision)
+        overlaps = []
+        for existing_rule in list(existing):
+            if existing_rule == key:
+                continue
+            b1 = _bigrams(key)
+            b2 = _bigrams(existing_rule)
+            if b1 and b2:
+                overlap = len(b1 & b2) / max(len(b1), len(b2))
+                if overlap >= 0.5:
+                    overlaps.append({
+                        "rule": existing_rule[:80],
+                        "overlap": round(overlap, 2)
+                    })
 
-            if overlaps:
-                info_flags.append({
-                    "new_rule": key[:80],
-                    "near_duplicates": overlaps[:3]
-                })
+        if overlaps:
+            info_flags.append({
+                "new_rule": key[:80],
+                "near_duplicates": overlaps[:3]
+            })
 
     # When REVIEW_MODE=1, info_flags will contain near-duplicate candidates for manual review
     return final_rules, info_flags
@@ -1410,6 +1419,23 @@ def create_briefing(turns: list[Turn], verbatim: int = DEFAULT_VERBATIM) -> str:
         "",
     ]
 
+
+    # Initialize info_flags if not already defined (F10)
+    if 'info_flags' not in dir():
+        info_flags = []
+    # Blocked rules section (F10)
+    blocked = [f for f in info_flags if f.get("blocked")]
+    if blocked:
+        lines.append("## BLOCKED RULES")
+        lines.append("*The following rules were blocked from being saved:*")
+        lines.append("")
+        for b in blocked[:10]:
+            reason = b.get('reason', 'unknown')
+            rule = b.get('rule', '')
+            lines.append(f"- **{reason}**: {rule}")
+        if len(blocked) > 10:
+            lines.append(f"- ... and {len(blocked)-10} more")
+        lines.append("")
     if rules:
         lines += [
             "---",
@@ -1723,6 +1749,16 @@ def _call_tool(name: str, args: dict) -> str:
                 out.append(f"WARNING: Rule store is FULL ({len(rules)}/{MAX_STORE_RULES}). New rules will be dropped.")
             else:
                 out.append(f"WARNING: Rule store is approaching capacity ({len(rules)}/{MAX_STORE_RULES}).")
+
+        # Blocked rules feedback (F10)
+        blocked = [f for f in info_flags if f.get("blocked")]
+        if blocked:
+            out.append("")
+            out.append(f"Blocked rules ({len(blocked)}):")
+            for b in blocked[:5]:
+                out.append(f"  - {b.get('reason', 'unknown')}: {b.get('rule', '')[:60]}")
+            if len(blocked) > 5:
+                out.append(f"  ... and {len(blocked)-5} more")
         return "\n".join(out)
 
     return f"Unknown tool: {name}"
@@ -1957,6 +1993,16 @@ def cmd_prune(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     briefing = create_briefing(turns, args.verbatim)
+
+    # Display blocked rules feedback (F10)
+    rules, info_flags = extract_rules_with_store(turns, use_store=True)
+    blocked = [f for f in info_flags if f.get("blocked")]
+    if blocked:
+        print(f"\nBlocked rules ({len(blocked)}):", file=sys.stderr)
+        for b in blocked[:5]:
+            print(f"  - {b.get('reason', 'unknown')}: {b.get('rule', '')[:60]}", file=sys.stderr)
+        if len(blocked) > 5:
+            print(f"  ... and {len(blocked)-5} more", file=sys.stderr)
     _, stats  = prune(turns, args.verbatim, args.rx)
 
     sep = "-" * 56
