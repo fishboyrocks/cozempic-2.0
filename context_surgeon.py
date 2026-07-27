@@ -310,16 +310,16 @@ CORRECTION_RE = re.compile(
 # the exact same hardened _sentence_around() path.
 IMPLICIT_CORRECTION_RE = re.compile(
     r"\b(?:"
-    r"actually[,.]"
+    r"actually[,. ]"
     r"|that's not right"
     r"|that's incorrect"
     r"|no[, ]that's"
-    r"|wait[, ]no"
+    r"|wait,? no"
     r"|I meant"
     r"|I said"
-    r"|sorry[, ]but"
+    r"|sorry,? but"
     r"|actually[, ]I"
-    r")\b",
+    r")",
     re.IGNORECASE,
 )
 
