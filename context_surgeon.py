@@ -85,9 +85,9 @@ v1.2.0 | https://github.com/fishboyrocks/cozempic-2.0
 """
 
 from __future__ import annotations
-import datetime as _dt
 
 import argparse
+import datetime as _dt
 import hashlib
 import json
 import os
@@ -100,7 +100,6 @@ import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-# ruff: noqa: E741
 
 # ---- Windows UTF-8 fix -------------------------------------------------------
 # Without this, MCP JSON-RPC over stdio silently mangles non-ASCII on Windows
@@ -1953,7 +1952,7 @@ def cmd_discover(_: argparse.Namespace) -> None:
 
 def cmd_rules_status(_: argparse.Namespace) -> None:
     """Show current rule store status and capacity."""
-    from context_surgeon import _load_rules_store, MAX_STORE_RULES
+    from context_surgeon import MAX_STORE_RULES, _load_rules_store
     
     store = _load_rules_store()
     rules = store.get("rules", [])

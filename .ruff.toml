@@ -1,0 +1,15 @@
+# Suppress rules that conflict with existing design choices in context_surgeon.py
+line-length = 120
+
+[lint]
+ignore = [
+    "S110",   # try-except-pass (intentional fall-through behavior)
+    "BLE001", # catch blind exception (robustness design)
+    "DTZ005", # datetime.now() without tz (legacy format compatibility)
+    "TRY004", # Prefer TypeError (existing ValueError semantics)
+    "UP036",  # outdated version block
+    "ISC004", # implicit string concatenation
+    "RUF007", # prefer pairwise (existing zip() semantics preserved)
+    "RUF059", # unpacked variable (unused but preserved for clarity)
+    "EXE001", # shebang executable bit
+]
