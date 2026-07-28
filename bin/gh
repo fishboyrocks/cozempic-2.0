@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+REAL_GH=/usr/bin/gh
+BASE="agentic-ai"
+HEAD=$(git branch --show-current 2>/dev/null || echo "unknown")
+
+# Intercept gh pr create and enforce mechanism
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  shift 2
+  # Ensure --base and --head are set correctly, removing any conflicting ones
+  args=("$@")
+  new_args=()
+  skip_next=0
+  for i in "${!args[@]}"; do
+    if [ $skip_next -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    arg="${args[$i]}"
+    if [ "$arg" = "--base" ]; then
+      skip_next=1
+      continue
+    elif [ "$arg" = "--head" ]; then
+      skip_next=1
+      continue
+    fi
+    new_args+=("$arg")
+  done
+  exec $REAL_GH pr create --base "$BASE" --head "$HEAD" "${new_args[@]}"
+else
+  exec $REAL_GH "$@"
+fi
